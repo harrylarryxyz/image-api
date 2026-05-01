@@ -1,7 +1,7 @@
 ---
 name: image-api
 description: Generate and edit images using Image API. Generic wrapper that works with any OpenAI-compatible image provider. Handles auth via env vars, retry on transient failures, resolution constraints, prompt verbatim passing, and content moderation.
-version: 3.0.2
+version: 3.1.0
 ---
 
 # Image API
