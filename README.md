@@ -98,3 +98,7 @@ image-api/
 ## License
 
 MIT
+
+## Friend Link
+
+[LinuxDo](https://www.linux.do)
