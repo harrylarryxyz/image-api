@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image API - 通用封装
+Image API - 通用封装 v3.1.0
 基于 OpenAI Image API (Generations + Edits)
 
 API: /v1/images/generations  生成
@@ -178,10 +178,17 @@ def _data_url_to_bytes(data_url: str) -> bytes:
 
 def _url_to_temp_file(url: str, suffix: str = ".png") -> str:
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        req = urllib.request.Request(url, headers={"User-Agent": "Image-API/3.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Image-API/3.1"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             f.write(resp.read())
         return f.name
+
+
+def _download_url(url: str) -> bytes:
+    """从 URL 下载图片，返回 bytes"""
+    req = urllib.request.Request(url, headers={"User-Agent": "Image-API/3.1"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read()
 
 
 def _prepare_image_source(value: str) -> str:
@@ -228,13 +235,31 @@ def _sleep_with_countdown(seconds: int, label: str = "重试") -> None:
     time.sleep(seconds)
 
 
+def _check_response_headers(headers_file: str) -> Optional[str]:
+    """检查响应头，返回错误信息（如果有）"""
+    try:
+        with open(headers_file, 'r') as f:
+            headers = f.read()
+        # 检查 content-type
+        for line in headers.split('\n'):
+            if line.lower().startswith('content-type:'):
+                ct = line.split(':', 1)[1].strip().lower()
+                if 'text/html' in ct:
+                    return f"服务端返回 HTML 而非 JSON（可能是网关错误页面或反爬拦截）"
+                break
+        return None
+    except Exception:
+        return None
+
+
 def _curl_json(endpoint: str, payload: Dict[str, Any], timeout: int = DEFAULT_TIMEOUT) -> Dict[str, Any]:
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(payload, f)
         data_file = f.name
+    headers_file = tempfile.mktemp(suffix='.headers')
     try:
         cmd = [
-            'curl', '-s', '--max-time', str(timeout),
+            'curl', '-s', '-D', headers_file, '--max-time', str(timeout),
             '-H', f'Authorization: Bearer {API_KEY}',
             '-H', 'Content-Type: application/json',
             '-d', f'@{data_file}',
@@ -243,6 +268,10 @@ def _curl_json(endpoint: str, payload: Dict[str, Any], timeout: int = DEFAULT_TI
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
         if result.returncode != 0:
             return {"_error": f"curl failed: {result.stderr}"}
+        # 检查响应头
+        header_err = _check_response_headers(headers_file)
+        if header_err:
+            return {"_error": f"{header_err}，响应前200字符: {result.stdout[:200]}"}
         return json.loads(result.stdout)
     except json.JSONDecodeError as e:
         return {"_error": f"JSON decode failed: {e}", "_raw": result.stdout[:300]}
@@ -250,6 +279,8 @@ def _curl_json(endpoint: str, payload: Dict[str, Any], timeout: int = DEFAULT_TI
         return {"_error": str(e)}
     finally:
         os.unlink(data_file)
+        if os.path.exists(headers_file):
+            os.unlink(headers_file)
 
 
 def _curl_multipart(
@@ -304,15 +335,21 @@ def _curl_multipart(
         cmd.extend(['-F', f'moderation={moderation}'])
 
     cmd.append(f'{API_BASE}{endpoint}')
+    headers_file = tempfile.mktemp(suffix='.headers')
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+        cmd_with_headers = cmd[:1] + ['-D', headers_file] + cmd[1:]
+        result = subprocess.run(cmd_with_headers, capture_output=True, text=True, timeout=timeout + 10)
         if resolved_image != image_path and os.path.exists(resolved_image):
             os.unlink(resolved_image)
         if resolved_mask and resolved_mask != mask_path and os.path.exists(resolved_mask):
             os.unlink(resolved_mask)
         if result.returncode != 0:
             return {"_error": f"curl failed: {result.stderr}"}
+        # 检查响应头
+        header_err = _check_response_headers(headers_file)
+        if header_err:
+            return {"_error": f"{header_err}，响应前200字符: {result.stdout[:200]}"}
         return json.loads(result.stdout)
     except json.JSONDecodeError as e:
         return {"_error": f"JSON decode failed: {e}", "_raw": result.stdout[:300]}
@@ -322,6 +359,9 @@ def _curl_multipart(
         if resolved_mask and resolved_mask != mask_path and os.path.exists(resolved_mask):
             os.unlink(resolved_mask)
         return {"_error": str(e)}
+    finally:
+        if os.path.exists(headers_file):
+            os.unlink(headers_file)
 
 
 def _parse_error(resp: Dict[str, Any]) -> Optional[str]:
@@ -347,22 +387,43 @@ def _save_images(resp: Dict[str, Any], prompt: str, outdir: str, prefix: Optiona
 
     for i, item in enumerate(data):
         b64 = item.get("b64_json", "")
-        if not b64:
+        url = item.get("url", "")
+
+        if b64:
+            # b64_json 格式
+            img_bytes = base64.b64decode(b64)
+            ext = _detect_format(img_bytes)
+            img = GeneratedImage(
+                index=i,
+                prompt=prompt,
+                b64_json=b64,
+                revised_prompt=item.get("revised_prompt"),
+            )
+            filepath = os.path.join(outdir, f"{base_name}_{i}.{ext}")
+            img.save(filepath)
+            results.append(img)
+        elif url:
+            # url 格式 — 从远程下载
+            try:
+                print(f"    [⬇️] 从 URL 下载图片 {i}...", file=sys.stderr)
+                img_bytes = _download_url(url)
+                ext = _detect_format(img_bytes)
+                filepath = os.path.join(outdir, f"{base_name}_{i}.{ext}")
+                with open(filepath, 'wb') as f:
+                    f.write(img_bytes)
+                img = GeneratedImage(
+                    index=i,
+                    prompt=prompt,
+                    b64_json="",  # url 模式没有 b64
+                    revised_prompt=item.get("revised_prompt"),
+                )
+                img.saved_path = filepath
+                img.file_size = os.path.getsize(filepath)
+                results.append(img)
+            except Exception as e:
+                print(f"    [⚠️] 下载图片 {i} 失败: {e}", file=sys.stderr)
+        else:
             continue
-
-        img_bytes = base64.b64decode(b64)
-        ext = _detect_format(img_bytes)
-
-        img = GeneratedImage(
-            index=i,
-            prompt=prompt,
-            b64_json=b64,
-            revised_prompt=item.get("revised_prompt"),
-        )
-
-        filepath = os.path.join(outdir, f"{base_name}_{i}.{ext}")
-        img.save(filepath)
-        results.append(img)
 
     return results
 
