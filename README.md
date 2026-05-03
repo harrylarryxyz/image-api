@@ -2,18 +2,17 @@
 
 通用图片生成与编辑工具，基于 OpenAI Image API (`/v1/images/generations` + `/v1/images/edits`)。
 
-**零依赖**，纯 Python stdlib + curl，不绑死任何 provider。
+**轻量依赖**，Python + requests，不绑死任何 provider。
 
 ## 特性
 
 - 🖼️ **文生图** + ✏️ **改图**（支持本地文件/URL/data URL）
 - 🔄 **自动重试** — 临时错误（429/502/超时）自动重试 2 次
-- 🔀 **主备双端点** — 主端点失败自动切换备用
-- 📐 **分辨率验证** — 基于 `resolution_map.json` 的服务端约束验证
 - 📊 **JSON 输出** — `--json` 模式输出结构化结果
 - 🔍 **双格式支持** — 同时支持 `b64_json` 和 `url` 响应格式（自动检测并下载）
 - 🛡️ **内容类型检查** — 检测 HTML 错误页面（网关错误/反爬拦截），给出明确提示
-- ⚡ **零依赖** — 只需 Python 3.8+ 和 curl
+- 🔗 **请求追踪** — 每请求 UUID 追踪（`X-Client-Request-Id`）
+- ⚡ **requests 原生** — multipart 使用 `requests` 原生 `files=` 参数，自动检测 MIME type
 
 ## 快速开始
 
@@ -72,8 +71,6 @@ python3 scripts/image_api.py --json "Make it blue" --edit --image source.png
 | `IMAGE_API_KEY` | API 密钥 | ✅ |
 | `IMAGE_MODEL` | 默认模型 | 否 (默认 gpt-image-2) |
 | `IMAGE_OUT_DIR` | 输出目录 | 否 (默认 /tmp/gptimage) |
-| `PRIMARY_IMAGE_API_BASE` | 主端点 URL | 否 |
-| `PRIMARY_IMAGE_API_KEY` | 主端点密钥 | 否 |
 
 ## 分辨率约束
 

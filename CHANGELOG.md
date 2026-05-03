@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.0] - 2026-05-03
+
+### Changed
+- **架构重构**: curl 子进程 → requests 原生调用，提升 edit 模式稳定性
+- `_curl_json` → `_request_json` (使用 `requests.Session.post`)
+- `_curl_multipart` → `_request_multipart` (使用 `requests` 原生 `files=` 参数)
+- 移除 `subprocess`、`tempfile`（curl 相关）依赖
+- 使用 `requests.Session` 复用连接，减少进程开销
+
+### Added
+- **MIME type 自动检测**: 根据文件扩展名上传 `image/png`、`image/jpeg` 等具体类型，不再使用 `application/octet-stream`
+- **请求追踪**: 每个请求生成 UUID，通过 `X-Client-Request-Id` 头传递
+- **详细错误诊断**: 错误信息包含 HTTP 状态码、Content-Type、Request-ID、CF-Ray
+- **连接复用**: Session 级别复用 HTTP 连接
+
+### Fixed
+- 修复 edit 模式 `NameError: name 'moderation' is not defined`（v3.x curl 架构遗留 bug）
+- 修复部分 provider 拒绝 `application/octet-stream` MIME type 的问题
+- 修复 edit 模式重试机制实际不生效的问题（旧版崩溃在重试逻辑之前）
+
 ## [3.1.0] - 2026-05-01
 
 ### Added

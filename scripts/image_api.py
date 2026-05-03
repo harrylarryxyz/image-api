@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image API - 通用封装 v3.1.0
+Image API - 通用封装 v4.0.0
 基于 OpenAI Image API (Generations + Edits)
 
 API: /v1/images/generations  生成
 API: /v1/images/edits        编辑
+
+v4.0.0 重构: curl 子进程 → requests 原生，提升 edit 模式稳定性
 
 环境变量:
   IMAGE_API_BASE  - API 端点 (如 https://api.example.com/v1)
@@ -27,12 +29,16 @@ import base64
 import os
 import sys
 import time
-import subprocess
-import tempfile
+import uuid
 import re
-import urllib.request
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
+
+try:
+    import requests as _requests
+except ImportError:
+    print("错误: requests 库未安装。请运行: pip install requests", file=sys.stderr)
+    sys.exit(1)
 
 # =============================================================================
 # 配置 - 从环境变量读取
@@ -68,6 +74,13 @@ def _get_config() -> tuple[str, str]:
 
 # 读取配置
 API_BASE, API_KEY = _get_config()
+
+# requests Session（复用连接）
+_session = _requests.Session()
+_session.headers.update({
+    "Authorization": f"Bearer {API_KEY}",
+    "User-Agent": "Image-API/4.0",
+})
 
 
 # =============================================================================
@@ -176,21 +189,6 @@ def _data_url_to_bytes(data_url: str) -> bytes:
     return base64.b64decode(match.group("data"))
 
 
-def _url_to_temp_file(url: str, suffix: str = ".png") -> str:
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        req = urllib.request.Request(url, headers={"User-Agent": "Image-API/3.1"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            f.write(resp.read())
-        return f.name
-
-
-def _download_url(url: str) -> bytes:
-    """从 URL 下载图片，返回 bytes"""
-    req = urllib.request.Request(url, headers={"User-Agent": "Image-API/3.1"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
-
-
 def _prepare_image_source(value: str) -> str:
     """
     准备图片来源，返回本地文件路径。
@@ -198,8 +196,19 @@ def _prepare_image_source(value: str) -> str:
     - URL：下载到临时文件，返回临时路径
     - data URL：解码到临时文件，返回临时路径
     """
+    import tempfile
     if _is_url(value):
-        return _url_to_temp_file(value)
+        resp = _session.get(value, timeout=30)
+        resp.raise_for_status()
+        suffix = ".png"
+        ct = resp.headers.get("content-type", "")
+        if "jpeg" in ct or "jpg" in ct:
+            suffix = ".jpg"
+        elif "webp" in ct:
+            suffix = ".webp"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(resp.content)
+            return f.name
     if _is_data_url(value):
         data = _data_url_to_bytes(value)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
@@ -210,80 +219,89 @@ def _prepare_image_source(value: str) -> str:
     return value
 
 
+def _download_url(url: str) -> bytes:
+    """从 URL 下载图片，返回 bytes"""
+    resp = _session.get(url, timeout=60)
+    resp.raise_for_status()
+    return resp.content
+
+
 # =============================================================================
-# 核心请求函数（带重试）
+# 诊断工具
 # =============================================================================
-def _is_retryable_error(error_msg: str) -> bool:
-    """判断是否为可重试的临时错误"""
-    retryable_patterns = [
-        "Upstream request failed",
-        "stream disconnected",
-        "connection reset",
-        "timeout",
-        "429",
-        "502",
-        "503",
-        "504",
+def _request_diagnostic(resp: _requests.Response) -> str:
+    """构建详细的请求诊断信息"""
+    parts = [
+        f"HTTP {resp.status_code}",
+        f"Content-Type: {resp.headers.get('content-type', 'unknown')}",
     ]
-    msg_lower = error_msg.lower()
-    return any(p.lower() in msg_lower for p in retryable_patterns)
+    # 追踪 ID
+    req_id = resp.headers.get("x-request-id") or resp.headers.get("request-id")
+    if req_id:
+        parts.append(f"Request-ID: {req_id}")
+    cf_ray = resp.headers.get("cf-ray")
+    if cf_ray:
+        parts.append(f"CF-Ray: {cf_ray}")
+    return " | ".join(parts)
 
 
-def _sleep_with_countdown(seconds: int, label: str = "重试") -> None:
-    """带提示的等待"""
-    print(f"    ⏳ {label}等待 {seconds} 秒...", file=sys.stderr)
-    time.sleep(seconds)
+def _is_html_error(resp: _requests.Response) -> Optional[str]:
+    """检测 HTML 错误页面（网关错误/反爬拦截）"""
+    ct = resp.headers.get("content-type", "").lower()
+    if "text/html" in ct and resp.status_code >= 400:
+        return f"服务端返回 HTML 而非 JSON（可能是网关错误页面或反爬拦截）"
+    return None
 
 
-def _check_response_headers(headers_file: str) -> Optional[str]:
-    """检查响应头，返回错误信息（如果有）"""
+# =============================================================================
+# 核心请求函数
+# =============================================================================
+def _request_json(
+    endpoint: str,
+    payload: Dict[str, Any],
+    timeout: int = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    """发送 JSON 请求（用于 /images/generations）"""
+    request_id = str(uuid.uuid4())[:8]
+    url = f"{API_BASE}{endpoint}"
+
     try:
-        with open(headers_file, 'r') as f:
-            headers = f.read()
-        # 检查 content-type
-        for line in headers.split('\n'):
-            if line.lower().startswith('content-type:'):
-                ct = line.split(':', 1)[1].strip().lower()
-                if 'text/html' in ct:
-                    return f"服务端返回 HTML 而非 JSON（可能是网关错误页面或反爬拦截）"
-                break
-        return None
-    except Exception:
-        return None
-
-
-def _curl_json(endpoint: str, payload: Dict[str, Any], timeout: int = DEFAULT_TIMEOUT) -> Dict[str, Any]:
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        json.dump(payload, f)
-        data_file = f.name
-    headers_file = tempfile.mktemp(suffix='.headers')
-    try:
-        cmd = [
-            'curl', '-s', '-D', headers_file, '--max-time', str(timeout),
-            '-H', f'Authorization: Bearer {API_KEY}',
-            '-H', 'Content-Type: application/json',
-            '-d', f'@{data_file}',
-            f'{API_BASE}{endpoint}'
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
-        if result.returncode != 0:
-            return {"_error": f"curl failed: {result.stderr}"}
-        # 检查响应头
-        header_err = _check_response_headers(headers_file)
-        if header_err:
-            return {"_error": f"{header_err}，响应前200字符: {result.stdout[:200]}"}
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        return {"_error": f"JSON decode failed: {e}", "_raw": result.stdout[:300]}
+        resp = _session.post(
+            url,
+            json=payload,
+            timeout=timeout,
+            headers={"X-Client-Request-Id": request_id},
+        )
+    except _requests.exceptions.Timeout:
+        return {"_error": f"请求超时 ({timeout}s)", "_request_id": request_id}
+    except _requests.exceptions.ConnectionError as e:
+        return {"_error": f"连接失败: {e}", "_request_id": request_id}
     except Exception as e:
-        return {"_error": str(e)}
-    finally:
-        os.unlink(data_file)
-        if os.path.exists(headers_file):
-            os.unlink(headers_file)
+        return {"_error": str(e), "_request_id": request_id}
+
+    # 检查 HTML 错误
+    html_err = _is_html_error(resp)
+    if html_err:
+        return {"_error": f"{html_err} | {_request_diagnostic(resp)}", "_request_id": request_id}
+
+    # 解析 JSON
+    try:
+        data = resp.json()
+    except Exception:
+        return {
+            "_error": f"JSON 解析失败 | {_request_diagnostic(resp)} | 响应前200字符: {resp.text[:200]}",
+            "_request_id": request_id,
+        }
+
+    # 非 2xx
+    if resp.status_code >= 400:
+        err_msg = data.get("error", {}).get("message", str(data)) if isinstance(data.get("error"), dict) else str(data)
+        return {"_error": f"HTTP {resp.status_code}: {err_msg[:200]}", "_request_id": request_id}
+
+    return data
 
 
-def _curl_multipart(
+def _request_multipart(
     endpoint: str,
     prompt: str,
     image_path: str,
@@ -297,7 +315,13 @@ def _curl_multipart(
     background: Optional[str] = None,
     response_format: str = "b64_json",
     timeout: int = DEFAULT_TIMEOUT,
+    moderation: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """发送 multipart 请求（用于 /images/edits）"""
+    request_id = str(uuid.uuid4())[:8]
+    url = f"{API_BASE}{endpoint}"
+
+    # 解析图片来源
     try:
         resolved_image = _prepare_image_source(image_path)
     except ValueError as e:
@@ -310,58 +334,93 @@ def _curl_multipart(
         except ValueError as e:
             return {"_error": str(e)}
 
-    cmd = [
-        'curl', '-s', '--max-time', str(timeout),
-        '-H', f'Authorization: Bearer {API_KEY}',
-        '-F', f'model={model}',
-        '-F', f'prompt={prompt}',
-        '-F', f'image=@{resolved_image}',
-        '-F', f'n={n}',
-        '-F', f'response_format={response_format}',
-    ]
-    if resolved_mask:
-        cmd.extend(['-F', f'mask=@{resolved_mask}'])
-    if size:
-        cmd.extend(['-F', f'size={size}'])
-    if quality:
-        cmd.extend(['-F', f'quality={quality}'])
-    if fmt:
-        cmd.extend(['-F', f'format={fmt}'])
-    if output_compression is not None:
-        cmd.extend(['-F', f'output_compression={output_compression}'])
-    if background:
-        cmd.extend(['-F', f'background={background}'])
-    if moderation:
-        cmd.extend(['-F', f'moderation={moderation}'])
+    # 构建 multipart fields
+    # files 格式: {"field": (filename, fileobj, content_type)}
+    files: Dict[str, Any] = {
+        "model": (None, model),
+        "prompt": (None, prompt),
+        "n": (None, str(n)),
+        "response_format": (None, response_format),
+    }
 
-    cmd.append(f'{API_BASE}{endpoint}')
-    headers_file = tempfile.mktemp(suffix='.headers')
+    # 图片文件（使用具体 MIME type，部分 provider 不接受 application/octet-stream）
+    def _guess_mime(filepath: str) -> str:
+        ext = os.path.splitext(filepath)[1].lower()
+        return {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(ext, "image/png")
+
+    image_filename = os.path.basename(resolved_image)
+    files["image"] = (image_filename, open(resolved_image, "rb"), _guess_mime(resolved_image))
+
+    if resolved_mask:
+        mask_filename = os.path.basename(resolved_mask)
+        files["mask"] = (mask_filename, open(resolved_mask, "rb"), _guess_mime(resolved_mask))
+
+    # 可选参数
+    if size:
+        files["size"] = (None, size)
+    if quality:
+        files["quality"] = (None, quality)
+    if fmt:
+        files["format"] = (None, fmt)
+    if output_compression is not None:
+        files["output_compression"] = (None, str(output_compression))
+    if background:
+        files["background"] = (None, background)
+    if moderation:
+        files["moderation"] = (None, moderation)
+    if model:
+        files["model"] = (None, model)
 
     try:
-        cmd_with_headers = cmd[:1] + ['-D', headers_file] + cmd[1:]
-        result = subprocess.run(cmd_with_headers, capture_output=True, text=True, timeout=timeout + 10)
-        if resolved_image != image_path and os.path.exists(resolved_image):
-            os.unlink(resolved_image)
-        if resolved_mask and resolved_mask != mask_path and os.path.exists(resolved_mask):
-            os.unlink(resolved_mask)
-        if result.returncode != 0:
-            return {"_error": f"curl failed: {result.stderr}"}
-        # 检查响应头
-        header_err = _check_response_headers(headers_file)
-        if header_err:
-            return {"_error": f"{header_err}，响应前200字符: {result.stdout[:200]}"}
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        return {"_error": f"JSON decode failed: {e}", "_raw": result.stdout[:300]}
+        resp = _session.post(
+            url,
+            files=files,
+            timeout=timeout,
+            headers={"X-Client-Request-Id": request_id},
+        )
+    except _requests.exceptions.Timeout:
+        return {"_error": f"请求超时 ({timeout}s)", "_request_id": request_id}
+    except _requests.exceptions.ConnectionError as e:
+        return {"_error": f"连接失败: {e}", "_request_id": request_id}
     except Exception as e:
+        return {"_error": str(e), "_request_id": request_id}
+    finally:
+        # 关闭文件句柄
+        for v in files.values():
+            if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "close"):
+                v[1].close()
+        # 清理临时文件
         if resolved_image != image_path and os.path.exists(resolved_image):
             os.unlink(resolved_image)
         if resolved_mask and resolved_mask != mask_path and os.path.exists(resolved_mask):
             os.unlink(resolved_mask)
-        return {"_error": str(e)}
-    finally:
-        if os.path.exists(headers_file):
-            os.unlink(headers_file)
+
+    # 检查 HTML 错误
+    html_err = _is_html_error(resp)
+    if html_err:
+        return {"_error": f"{html_err} | {_request_diagnostic(resp)}", "_request_id": request_id}
+
+    # 解析 JSON
+    try:
+        data = resp.json()
+    except Exception:
+        return {
+            "_error": f"JSON 解析失败 | {_request_diagnostic(resp)} | 响应前200字符: {resp.text[:200]}",
+            "_request_id": request_id,
+        }
+
+    # 非 2xx
+    if resp.status_code >= 400:
+        err_msg = data.get("error", {}).get("message", str(data)) if isinstance(data.get("error"), dict) else str(data)
+        return {"_error": f"HTTP {resp.status_code}: {err_msg[:200]}", "_request_id": request_id}
+
+    return data
 
 
 def _parse_error(resp: Dict[str, Any]) -> Optional[str]:
@@ -438,6 +497,29 @@ def _detect_format(img_bytes: bytes) -> str:
     return "png"
 
 
+def _is_retryable_error(error_msg: str) -> bool:
+    """判断是否为可重试的临时错误"""
+    retryable_patterns = [
+        "Upstream request failed",
+        "stream disconnected",
+        "connection reset",
+        "timeout",
+        "连接失败",
+        "429",
+        "502",
+        "503",
+        "504",
+    ]
+    msg_lower = error_msg.lower()
+    return any(p.lower() in msg_lower for p in retryable_patterns)
+
+
+def _sleep_with_countdown(seconds: int, label: str = "重试") -> None:
+    """带提示的等待"""
+    print(f"    ⏳ {label}等待 {seconds} 秒...", file=sys.stderr)
+    time.sleep(seconds)
+
+
 # =============================================================================
 # 主要 API 函数（带重试）
 # =============================================================================
@@ -465,7 +547,7 @@ def generate(
             _sleep_with_countdown(RETRY_DELAY, f"第{attempt}次重试")
 
         start = time.time()
-        resp = _curl_json("/images/generations", payload, timeout=config.timeout)
+        resp = _request_json("/images/generations", payload, timeout=config.timeout)
         elapsed = time.time() - start
 
         err = _parse_error(resp)
@@ -523,7 +605,7 @@ def edit(
             _sleep_with_countdown(RETRY_DELAY, f"第{attempt}次重试")
 
         start = time.time()
-        resp = _curl_multipart(
+        resp = _request_multipart(
             "/images/edits",
             prompt=prompt,
             image_path=image,
@@ -537,6 +619,7 @@ def edit(
             background=config.background,
             response_format=config.response_format,
             timeout=config.timeout,
+            moderation=config.moderation,
         )
         elapsed = time.time() - start
 
