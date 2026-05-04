@@ -1,7 +1,7 @@
 ---
 name: image-api
 description: Generate and edit images using Image API. Generic wrapper that works with any OpenAI-compatible image provider. Handles auth via env vars, retry on transient failures, resolution constraints, prompt verbatim passing, and content moderation.
-version: 4.0.1
+version: 4.1.0
 ---
 
 # Image API
@@ -40,7 +40,7 @@ source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
 python3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image "<path>" "<prompt>" --size <size> --quality low --format png --moderation low
 ```
 
-## 默认参数
+**多参考图编辑：**\n```bash\nsource ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE\npython3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image \"<main>\" --ref \"<ref1>\" --ref \"<ref2>\" \"<prompt>\" --size <size> --quality low --format png --moderation low\n```\n\n## 默认参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -62,15 +62,53 @@ python3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image "<
 
 成功后通过 `MEDIA:/tmp/gptimage/xxx.png` 发送。Telegram 自动处理。
 
+**高质量投递（推荐）：** Telegram 会压缩图片消息。对于生成/编辑结果，尽量同时发送：
+1. 图片预览 — `send_message` 用 `MEDIA:` 路径，方便内联查看
+2. 原文件附件 — 同路径再发一次作为文件，保留原始画质
+
+如果图片消息投递失败但文件存在，降级为发送文件附件。
+
+## 参考图工作流（--edit 模式）
+
+**单参考图：** `--image` 传入一张图，API 直接看到像素。
+
+**多参考图（v4.1.0）：** `--ref` 可重复传入多张参考图，底层用 `image[]` multipart 字段发送。
+```bash
+--edit --image 主图.png --ref 参考1.png --ref 参考2.png "prompt"
+```
+
+当用户说"把这个人加到那个场景里"：
+- 选**人物图**作为 `--image`（主图）
+- 场景图作为 `--ref`（参考图）
+- 效果优于纯文字描述
+
+当用户只发了一张图并说"用这张图生成"：
+- 默认使用 `--edit` 模式，图片作为参考
+- 不需要先描述图片内容再生成，直接调 API
+
+当用户发图但没说要做什么：
+- 先问用户想要生成什么样的图
+
+## Agent 行为纠正
+
+当用户发图并说"把她加进去"/"以这张图为参考"时，意图是**用该图作为 `--edit --image` 的参考图**，不是让你先分析图片再描述。不要对用户发的参考图调用 vision_analyze，除非用户明确要求你描述图片内容。
+
 ## 关键陷阱
 
 1. **terminal cwd 被删除** — 清理临时目录前先 `cd /root`，否则后续所有 terminal 调用报 FileNotFoundError。已坏时用 `execute_code + subprocess.run(cwd="/root")` 绕过
-2. **API Key 无效返回 "Upstream request failed"** — 某 provider 对错误 key 不返回 401 而是 upstream failed，先验证 key 再重试
+2. **API Key 无效返回 "Upstream request failed"** — 部分 provider 对错误 key 不返回 401 而是 upstream failed，先验证 key 再重试
 3. **edit 模式 stream disconnected** — 部分 provider 不稳定，脚本自动重试 2 次。仍失败则降级 generate
-4. **分辨率上限** — 竖版最大 1920×3840，超过会服务端超时
+4. **分辨率约束** — 宽高必须是 16 的倍数，最长边 ≤ 3840px，总像素 655K~8.3M，宽高比 ≤ 3:1（脚本预校验，不等 API 报错）
+5. **mask 校验** — `--validate-mask` 检查 mask 尺寸/alpha；`--fix-mask-alpha` 自动把灰度 mask 转 RGBA alpha mask（需要 Pillow）
+5. **mimo-v2.5 vision 有严重幻觉** — mimo-v2.5 作为 vision 模型会编造场景（如把灰色背景编成户外、虚构粉色手机壳等）。不要用 mimo-v2.5 做图片描述。mimo-v2.5-pro 的 vision 准确
+6. **mimo-v2.5-pro 不支持 inline 图片** — mimo-v2.5-pro 作为主模型时，gateway 以 base64 image_url 格式 inline 附图会被静默丢弃（不报错、不处理）。解决：设 `image_input_mode: text`，让图片先经 vision_analyze 预处理为文本描述再传入对话
+7. **auxiliary.vision 设 base_url 导致 provider 解析为 "custom"** — 当 auxiliary.vision.base_url 非空时，代码将 provider 强制设为 "custom"，使用 OPENAI_API_KEY 而非实际 provider 的 key，导致 401。解决：base_url 留空，让 auto-detect 正确解析 provider
+8. **用户发了图但模型没收到** — Telegram 网关有时缓存了图片但未传入模型上下文。症状：用户说"用这张图"但对话中没有图片附件。排查：`ls -lt ~/.hermes/image_cache/` 找最新文件，`grep "Image routing\|Flushing photo\|Cached user photo" ~/.hermes/logs/gateway.log` 确认网关是否收到。找到路径后直接用 `--edit --image "<path>"` 生成
+9. **用户发图时的意图判断** — 用户在图片生成对话中发图片+文字，大概率是要用图作为参考/编辑素材，不是让你描述图片内容。如果消息含图片但你只看到文字描述，先怀疑图片丢失而非用户没发图
 
 ## 详细参考
 
 - `references/fields.md` — 字段映射、安全替换表
 - `references/provider-quirks.md` — Provider 非标准行为
 - `references/resolution-guide.md` — 分辨率约束完整数据
+- `references/image-delivery-debugging.md` — 用户说"图片没收到"时的诊断流程

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image API - 通用封装 v4.0.0
+Image API - 通用封装 v4.1.0
 基于 OpenAI Image API (Generations + Edits)
 
 API: /v1/images/generations  生成
 API: /v1/images/edits        编辑
 
 v4.0.0 重构: curl 子进程 → requests 原生，提升 edit 模式稳定性
+v4.1.0 合并: 多参考图(--ref)、参数预校验、mask 校验修复、延迟配置加载
 
 环境变量:
   IMAGE_API_BASE  - API 端点 (如 https://api.example.com/v1)
@@ -18,6 +19,9 @@ v4.0.0 重构: curl 子进程 → requests 原生，提升 edit 模式稳定性
   普通模式:
     python3 image_api.py "A beautiful sunset" --size 1536x1024 --quality high
     python3 image_api.py "Make it green" --edit --image source.png
+
+  多参考图编辑:
+    python3 image_api.py "Combine these" --edit --image main.png --ref ref1.png --ref ref2.png
 
   JSON 输出模式（用于程序化调用）:
     python3 image_api.py "A cat" --size 1024x1024 --json
@@ -31,7 +35,8 @@ import sys
 import time
 import uuid
 import re
-from typing import Optional, List, Dict, Any
+import mimetypes
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 
 try:
@@ -41,7 +46,7 @@ except ImportError:
     sys.exit(1)
 
 # =============================================================================
-# 配置 - 从环境变量读取
+# 配置 - 延迟加载（避免 --help / 纯参数校验时因缺 env 直接退出）
 # =============================================================================
 
 DEFAULT_OUTDIR = os.environ.get("IMAGE_OUT_DIR", "/tmp/gptimage")
@@ -50,37 +55,107 @@ DEFAULT_MODEL = os.environ.get("IMAGE_MODEL", "gpt-image-2")
 MAX_RETRIES = 2
 RETRY_DELAY = 5  # seconds
 
+# 参数校验常量
+VALID_QUALITIES = {"low", "medium", "high", "auto"}
+VALID_BACKGROUNDS = {"opaque", "auto", "transparent"}
+VALID_FORMATS = {"png", "jpeg", "webp"}
+MIN_PIXELS = 655_360
+MAX_PIXELS = 8_294_400
+MAX_EDGE = 3840
+MAX_ASPECT_RATIO = 3.0
 
-def _get_config() -> tuple[str, str]:
-    """
-    从环境变量获取 API 配置。
-    返回: (base_url, api_key)
+# 全局配置（延迟初始化）
+API_BASE: Optional[str] = None
+API_KEY: Optional[str] = None
 
-    不读取 config.yaml，不绑定具体 provider。
-    用户通过 IMAGE_API_BASE 和 IMAGE_API_KEY 环境变量指定任意 provider。
-    """
+
+def ensure_runtime_config() -> Tuple[str, str]:
+    """延迟读取环境变量，首次实际调用时才初始化。"""
+    global API_BASE, API_KEY
+    if API_BASE and API_KEY:
+        return API_BASE, API_KEY
+
+    missing = []
     base_url = os.environ.get("IMAGE_API_BASE", "").rstrip("/")
     api_key = os.environ.get("IMAGE_API_KEY", "")
-
     if not base_url:
-        print("错误: IMAGE_API_BASE 未设置。请在环境变量中设置 API 端点。", file=sys.stderr)
-        sys.exit(1)
+        missing.append("IMAGE_API_BASE")
     if not api_key:
-        print("错误: IMAGE_API_KEY 未设置。请在环境变量中设置 API 密钥。", file=sys.stderr)
-        sys.exit(1)
+        missing.append("IMAGE_API_KEY")
+    if missing:
+        raise RuntimeError(
+            "Image API 尚未配置：缺少 " + ", ".join(missing) + "。"
+            "请在 skill 目录创建 .env：复制 .env.example 为 .env，"
+            "然后填写 IMAGE_API_BASE 和 IMAGE_API_KEY。"
+            "例如 IMAGE_API_BASE=http://api.example.com/v1。"
+        )
 
-    return base_url, api_key
+    API_BASE = base_url
+    API_KEY = api_key
+    _session.headers.update({
+        "Authorization": f"Bearer {API_KEY}",
+    })
+    return API_BASE, API_KEY
 
-
-# 读取配置
-API_BASE, API_KEY = _get_config()
 
 # requests Session（复用连接）
 _session = _requests.Session()
 _session.headers.update({
-    "Authorization": f"Bearer {API_KEY}",
-    "User-Agent": "Image-API/4.0",
+    "User-Agent": "Image-API/4.1",
 })
+
+
+# =============================================================================
+# 参数预校验
+# =============================================================================
+
+def _is_gpt_image_2(model: str) -> bool:
+    return model.strip().lower() == "gpt-image-2"
+
+
+def _validate_image_options(
+    *,
+    model: str,
+    size: Optional[str] = None,
+    quality: Optional[str] = None,
+    fmt: Optional[str] = None,
+    output_compression: Optional[int] = None,
+    background: Optional[str] = None,
+) -> None:
+    """Validate options against current GPT Image API constraints before sending."""
+    if quality and quality not in VALID_QUALITIES:
+        raise ValueError(f"quality 必须是 {sorted(VALID_QUALITIES)} 之一")
+    if background and background not in VALID_BACKGROUNDS:
+        raise ValueError(f"background 必须是 {sorted(VALID_BACKGROUNDS)} 之一")
+    if fmt and fmt not in VALID_FORMATS:
+        raise ValueError(f"format 必须是 {sorted(VALID_FORMATS)} 之一")
+
+    if _is_gpt_image_2(model) and background == "transparent":
+        raise ValueError("gpt-image-2 目前不支持 background=transparent；请改用 background=auto/opaque，或换支持透明背景的模型。")
+
+    if output_compression is not None:
+        if not 0 <= output_compression <= 100:
+            raise ValueError("output_compression 必须在 0-100 之间")
+        if fmt not in {"jpeg", "webp"}:
+            raise ValueError("output_compression 只适用于 jpeg/webp；PNG 请不要设置 --compression")
+
+    if not size or size == "auto":
+        return
+
+    m = re.match(r"^(\d+)x(\d+)$", size)
+    if not m:
+        raise ValueError("size 必须是 auto 或 <宽>x<高>，例如 1024x1024")
+    width, height = int(m.group(1)), int(m.group(2))
+    if width % 16 != 0 or height % 16 != 0:
+        raise ValueError("size 的宽高都必须能被 16 整除")
+    if max(width, height) > MAX_EDGE:
+        raise ValueError(f"size 最长边不能超过 {MAX_EDGE}px")
+    ratio = max(width, height) / min(width, height)
+    if ratio > MAX_ASPECT_RATIO:
+        raise ValueError("size 长短边比例不能超过 3:1")
+    pixels = width * height
+    if pixels < MIN_PIXELS or pixels > MAX_PIXELS:
+        raise ValueError(f"size 总像素需在 {MIN_PIXELS:,}-{MAX_PIXELS:,} 之间")
 
 
 # =============================================================================
@@ -137,8 +212,6 @@ class ImageGenConfig:
         if self.quality:
             payload["quality"] = self.quality
         if self.format:
-            if self.format == "png" and self.output_compression is not None and self.output_compression != 100:
-                raise ValueError("PNG 格式只支持 output_compression=100")
             payload["format"] = self.format
         if self.output_compression is not None:
             payload["output_compression"] = self.output_compression
@@ -156,6 +229,7 @@ class ImageEditConfig:
     model: str = DEFAULT_MODEL
     image: str = ""
     mask: Optional[str] = None
+    refs: Optional[List[str]] = None
     size: Optional[str] = None
     quality: Optional[str] = None
     n: int = 1
@@ -226,6 +300,58 @@ def _download_url(url: str) -> bytes:
     return resp.content
 
 
+def _guess_mime(filepath: str) -> str:
+    """猜测图片 MIME type"""
+    mime, _ = mimetypes.guess_type(filepath)
+    if mime and mime.startswith("image/"):
+        return mime
+    ext = os.path.splitext(filepath)[1].lower()
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(ext, "image/png")
+
+
+# =============================================================================
+# Mask 校验与修复
+# =============================================================================
+
+def _validate_or_fix_mask(image_path: str, mask_path: str, fix: bool = False) -> Optional[str]:
+    """Validate mask dimensions/alpha. If fix=True, add alpha from grayscale mask when possible."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise RuntimeError("mask 预检需要 Pillow：请安装 pillow，或不要使用 --validate-mask/--fix-mask-alpha")
+
+    resolved_image = _prepare_image_source(image_path)
+    resolved_mask = _prepare_image_source(mask_path)
+    try:
+        image = Image.open(resolved_image)
+        mask = Image.open(resolved_mask)
+        if image.size != mask.size:
+            raise ValueError(f"mask 尺寸必须与原图一致：image={image.size}, mask={mask.size}")
+        if mask.format and image.format and mask.format != image.format:
+            print(f"    [⚠️] mask 格式 {mask.format} 与原图 {image.format} 不一致，官方要求同格式；兼容 provider 可能仍接受。", file=sys.stderr)
+        has_alpha = mask.mode in ("RGBA", "LA") or (mask.mode == "P" and "transparency" in mask.info)
+        if has_alpha:
+            return resolved_mask
+        if not fix:
+            raise ValueError("mask 必须包含 alpha channel；可加 --fix-mask-alpha 自动把灰度 mask 转为 RGBA alpha mask")
+        mask_l = mask.convert("L")
+        mask_rgba = mask_l.convert("RGBA")
+        mask_rgba.putalpha(mask_l)
+        fixed_path = os.path.splitext(resolved_mask)[0] + "_alpha.png"
+        mask_rgba.save(fixed_path, format="PNG")
+        print(f"    [mask] 已生成 alpha mask: {fixed_path}", file=sys.stderr)
+        return fixed_path
+    finally:
+        if resolved_image != image_path and os.path.exists(resolved_image):
+            os.unlink(resolved_image)
+
+
 # =============================================================================
 # 诊断工具
 # =============================================================================
@@ -262,8 +388,9 @@ def _request_json(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
     """发送 JSON 请求（用于 /images/generations）"""
+    base_url, _ = ensure_runtime_config()
     request_id = str(uuid.uuid4())[:8]
-    url = f"{API_BASE}{endpoint}"
+    url = f"{base_url}{endpoint}"
 
     try:
         resp = _session.post(
@@ -305,6 +432,7 @@ def _request_multipart(
     endpoint: str,
     prompt: str,
     image_path: str,
+    extra_image_paths: Optional[List[str]] = None,
     mask_path: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     size: Optional[str] = None,
@@ -318,14 +446,31 @@ def _request_multipart(
     moderation: Optional[str] = None,
 ) -> Dict[str, Any]:
     """发送 multipart 请求（用于 /images/edits）"""
+    base_url, _ = ensure_runtime_config()
     request_id = str(uuid.uuid4())[:8]
-    url = f"{API_BASE}{endpoint}"
+    url = f"{base_url}{endpoint}"
+
+    _validate_image_options(
+        model=model,
+        size=size,
+        quality=quality,
+        fmt=fmt,
+        output_compression=output_compression,
+        background=background,
+    )
 
     # 解析图片来源
     try:
         resolved_image = _prepare_image_source(image_path)
     except ValueError as e:
         return {"_error": str(e)}
+
+    resolved_extra_images: List[str] = []
+    for value in extra_image_paths or []:
+        try:
+            resolved_extra_images.append(_prepare_image_source(value))
+        except ValueError as e:
+            return {"_error": str(e)}
 
     resolved_mask = None
     if mask_path:
@@ -334,48 +479,38 @@ def _request_multipart(
         except ValueError as e:
             return {"_error": str(e)}
 
-    # 构建 multipart fields
-    # files 格式: {"field": (filename, fileobj, content_type)}
-    files: Dict[str, Any] = {
-        "model": (None, model),
-        "prompt": (None, prompt),
-        "n": (None, str(n)),
-        "response_format": (None, response_format),
-    }
+    # 构建 multipart fields（list-of-tuples，支持同名 image[] 多字段）
+    files: List[Tuple[str, Any]] = [
+        ("model", (None, model)),
+        ("prompt", (None, prompt)),
+        ("n", (None, str(n))),
+        ("response_format", (None, response_format)),
+    ]
 
     # 图片文件（使用具体 MIME type，部分 provider 不接受 application/octet-stream）
-    def _guess_mime(filepath: str) -> str:
-        ext = os.path.splitext(filepath)[1].lower()
-        return {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-        }.get(ext, "image/png")
-
-    image_filename = os.path.basename(resolved_image)
-    files["image"] = (image_filename, open(resolved_image, "rb"), _guess_mime(resolved_image))
+    all_images = [resolved_image, *resolved_extra_images]
+    image_field = "image[]" if len(all_images) > 1 else "image"
+    for item in all_images:
+        image_filename = os.path.basename(item)
+        files.append((image_field, (image_filename, open(item, "rb"), _guess_mime(item))))
 
     if resolved_mask:
         mask_filename = os.path.basename(resolved_mask)
-        files["mask"] = (mask_filename, open(resolved_mask, "rb"), _guess_mime(resolved_mask))
+        files.append(("mask", (mask_filename, open(resolved_mask, "rb"), _guess_mime(resolved_mask))))
 
     # 可选参数
     if size:
-        files["size"] = (None, size)
+        files.append(("size", (None, size)))
     if quality:
-        files["quality"] = (None, quality)
+        files.append(("quality", (None, quality)))
     if fmt:
-        files["format"] = (None, fmt)
+        files.append(("format", (None, fmt)))
     if output_compression is not None:
-        files["output_compression"] = (None, str(output_compression))
+        files.append(("output_compression", (None, str(output_compression))))
     if background:
-        files["background"] = (None, background)
+        files.append(("background", (None, background)))
     if moderation:
-        files["moderation"] = (None, moderation)
-    if model:
-        files["model"] = (None, model)
+        files.append(("moderation", (None, moderation)))
 
     try:
         resp = _session.post(
@@ -392,7 +527,7 @@ def _request_multipart(
         return {"_error": str(e), "_request_id": request_id}
     finally:
         # 关闭文件句柄
-        for v in files.values():
+        for _, v in files:
             if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "close"):
                 v[1].close()
         # 清理临时文件
@@ -400,6 +535,9 @@ def _request_multipart(
             os.unlink(resolved_image)
         if resolved_mask and resolved_mask != mask_path and os.path.exists(resolved_mask):
             os.unlink(resolved_mask)
+        for original, resolved in zip(extra_image_paths or [], resolved_extra_images):
+            if resolved != original and os.path.exists(resolved):
+                os.unlink(resolved)
 
     # 检查 HTML 错误
     html_err = _is_html_error(resp)
@@ -533,13 +671,21 @@ def generate(
 
     os.makedirs(config.outdir, exist_ok=True)
 
+    _validate_image_options(
+        model=config.model,
+        size=config.size,
+        quality=config.quality,
+        fmt=config.format,
+        output_compression=config.output_compression,
+        background=config.background,
+    )
+
     payload = config.to_payload()
     payload["prompt"] = prompt
 
     if not silent:
         print(f"[生成] {prompt[:50]}...")
         print(f"    参数: size={config.size or 'default'} quality={config.quality or 'default'} n={config.n}")
-        print(f"    端点: {API_BASE}")
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -549,6 +695,9 @@ def generate(
         start = time.time()
         resp = _request_json("/images/generations", payload, timeout=config.timeout)
         elapsed = time.time() - start
+
+        if not silent:
+            print(f"    端点: {ensure_runtime_config()[0]}")
 
         err = _parse_error(resp)
         if err:
@@ -594,10 +743,11 @@ def edit(
     if not silent:
         print(f"[编辑] {prompt[:50]}...")
         print(f"    原图: {image}")
+        if config.refs:
+            print(f"    参考图: {len(config.refs)} 张")
         if mask:
             print(f"    mask: {mask}")
         print(f"    参数: size={config.size or 'default'} quality={config.quality or 'default'}")
-        print(f"    端点: {API_BASE}")
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -609,6 +759,7 @@ def edit(
             "/images/edits",
             prompt=prompt,
             image_path=image,
+            extra_image_paths=config.refs,
             mask_path=mask,
             model=config.model,
             size=config.size,
@@ -622,6 +773,9 @@ def edit(
             moderation=config.moderation,
         )
         elapsed = time.time() - start
+
+        if not silent:
+            print(f"    端点: {ensure_runtime_config()[0]}")
 
         err = _parse_error(resp)
         if err:
@@ -698,6 +852,9 @@ def main():
     python3 image_api.py "Make it green" --edit --image source.png
     python3 image_api.py "Add a red hat" --edit --image source.png --mask mask.png
 
+  多参考图编辑:
+    python3 image_api.py "Combine" --edit --image main.png --ref ref1.png --ref ref2.png
+
   URL / data URL 编辑:
     python3 image_api.py "Make it blue" --edit --image https://example.com/img.png
     python3 image_api.py "Change style" --edit --image "data:image/png;base64,...."
@@ -710,18 +867,21 @@ def main():
     parser.add_argument("prompt", help="图片描述 / 编辑描述")
     parser.add_argument("--edit", action="store_true", help="使用 edits 端点（编辑模式）")
     parser.add_argument("--image", help="原图路径/URL/data URL（编辑模式必填）")
+    parser.add_argument("--ref", dest="refs", action="append", default=[], help="参考图，可重复传入；--edit 下作为额外 image[]")
     parser.add_argument("--mask", help="mask 路径/URL/data URL（可选）")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"模型名称 (默认 {DEFAULT_MODEL})")
-    parser.add_argument("--size", default="1024x1024", help="尺寸，默认 1024x1024")
-    parser.add_argument("--quality", default="low", help="质量 (low/medium/high)")
+    parser.add_argument("--size", default="1024x1024", help="尺寸，默认 1024x1024；也支持 auto 与符合约束的任意 16 倍数尺寸")
+    parser.add_argument("--quality", default="low", choices=["low", "medium", "high", "auto"], help="质量 (low/medium/high/auto)")
     parser.add_argument("--n", type=int, default=1, help="生成数量 1-10（实际上游始终只返回 1）")
-    parser.add_argument("--format", dest="fmt", choices=["png", "jpeg", "webp"], help="输出格式（上游始终返回 PNG）")
-    parser.add_argument("--compression", type=int, help="压缩率 0-100（PNG 只支持 100）")
-    parser.add_argument("--background", choices=["opaque", "auto"], help="背景")
-    parser.add_argument("--moderation", choices=["auto", "low"], help="审核级别")
+    parser.add_argument("--format", dest="fmt", choices=["png", "jpeg", "webp"], help="输出格式")
+    parser.add_argument("--compression", type=int, help="压缩率 0-100（仅 jpeg/webp）")
+    parser.add_argument("--background", choices=["opaque", "auto", "transparent"], help="背景")
+    parser.add_argument("--moderation", choices=["auto", "low"], default="low", help="审核级别，默认 low")
     parser.add_argument("--outdir", "-o", default=DEFAULT_OUTDIR, help="输出目录")
     parser.add_argument("--prefix", help="文件名前缀")
     parser.add_argument("--timeout", type=int, default=900, help="超时秒数")
+    parser.add_argument("--validate-mask", action="store_true", help="编辑前检查 mask 尺寸/alpha")
+    parser.add_argument("--fix-mask-alpha", action="store_true", help="mask 无 alpha 时自动转为 RGBA alpha mask（需要 Pillow）")
     parser.add_argument("--json", action="store_true", help="JSON 结构化输出模式（用于程序化调用）")
 
     args = parser.parse_args()
@@ -735,12 +895,24 @@ def main():
             print(f"[❌] {err}")
         sys.exit(1)
 
+    # Mask 预检
+    if args.edit and args.mask and (args.validate_mask or args.fix_mask_alpha):
+        try:
+            args.mask = _validate_or_fix_mask(args.image, args.mask, fix=args.fix_mask_alpha)
+        except Exception as e:
+            if args.json:
+                print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+            else:
+                print(f"[❌] {e}")
+            sys.exit(1)
+
     # 构建配置
     if args.edit:
         config = ImageEditConfig(
             model=args.model,
             image=args.image,
             mask=args.mask,
+            refs=args.refs if args.refs else None,
             size=args.size,
             quality=args.quality,
             n=args.n,
@@ -778,6 +950,7 @@ def main():
                 "ok": True,
                 "paths": [img.saved_path for img in images if img.saved_path],
                 "used_params": {
+                    "mode": "edit" if args.edit else "generate",
                     "model": args.model,
                     "size": args.size,
                     "quality": args.quality,
@@ -785,7 +958,7 @@ def main():
                     "n": args.n,
                     "moderation": args.moderation or "low",
                 },
-                "endpoint": API_BASE,
+                "endpoint": ensure_runtime_config()[0],
             }
             print(json.dumps(result, ensure_ascii=False))
         else:
@@ -794,7 +967,7 @@ def main():
 
     except Exception as e:
         if args.json:
-            print(json.dumps({"ok": False, "error": str(e), "endpoint": API_BASE}, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": str(e), "endpoint": API_BASE or ""}, ensure_ascii=False))
         else:
             print(f"[❌] 失败: {e}")
         sys.exit(1)

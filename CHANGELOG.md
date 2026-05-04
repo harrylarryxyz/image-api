@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.1.0] - 2026-05-04
+
+### Added
+- **多参考图编辑**: `--ref` 参数支持多次传入参考图，底层用 multipart `image[]` 发送
+- **参数预校验**: 尺寸必须 16 倍数、最长边 ≤ 3840px、总像素 655K~8.3M、宽高比 ≤ 3:1，不等 API 报错
+- **Mask 校验与修复**: `--validate-mask` 检查尺寸/alpha；`--fix-mask-alpha` 自动把灰度 mask 转 RGBA alpha mask（需要 Pillow）
+- **延迟配置加载**: `--help` 和参数校验不再因缺少环境变量而报错
+- **quality 新增 `auto` 选项**
+- **background 新增 `transparent` 选项**（gpt-image-2 自动拦截并报错）
+- **高质量投递规范**: 预览图 + 原文件双发，保留 Telegram 压缩前的画质
+- 新增 references: cpa-provider-quirks.md, gateway-image-debug.md, image-delivery-debugging.md
+
+### Changed
+- Multipart 请求从 dict 改为 list-of-tuples，支持同名 `image[]` 多字段
+- `_guess_mime` 从嵌套函数提升为模块级函数，配合 `mimetypes` 标准库
+- 配置从模块顶部立即读取改为 `ensure_runtime_config()` 延迟加载
+
 ## [4.0.0] - 2026-05-03
 
 ### Changed
