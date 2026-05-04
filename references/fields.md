@@ -38,37 +38,37 @@
 请补充修改要求，例如你想把图片改成什么效果。
 ```
 
-## 多张参考图限制（重要）
+## 多参考图编辑
 
-edits API (`/v1/images/edits`) **一次只能处理一张基础图 (`--image`) + 一张可选的 mask (`--mask`)**。mask 是黑白遮罩，不能作为风格/场景参考图使用。
+v4.1.0 起支持多参考图编辑。使用 `--ref` 可传入多张额外参考图：
 
-这意味着以下常见需求**无法直接实现**：
-- "用这张图的产品，参考那张图的场景风格"
-- "把 A 图的主体放到 B 图的环境里"
-- "参考这张图的打光，为那张图重新生成"
+```bash
+python3 image_api.py --json --edit --image <主图> --ref <参考1> --ref <参考2> "prompt"
+```
 
-**遇到此类需求时，不要直接执行。** 正确流程：
-1. **明确告知限制**：edits API 只能看到一张 base image，无法同时读取第二张参考图
-2. **请用户文字描述参考图特征**：背景颜色/材质、光源方向、整体色调、有无道具、摄影角度等
-3. **以产品/主体图作为 `--image`**，将文字描述的场景特征完整写进 prompt
-4. 如果用户坚持要精确还原参考图场景，说明这超出了当前 edits API 的能力范围
+底层通过 multipart `image[]` 字段发送，匹配 OpenAI 多图 edits 行为。
 
-> 经验：反复在 prompt 中写"参照参考图的风格/场景"但模型看不到参考图，效果必然不对。必须先拿到文字描述再执行。
+- `--image`：主图（必须），API 直接看到像素
+- `--ref`：额外参考图（可选，可重复），作为 `image[]` 发送
+- `--mask`：遮罩图（可选），用于局部编辑
+
+单图时用 `image` 字段名，多图时自动切换为 `image[]`。
 
 ## 可选字段
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `model` | `gpt-image-2` | 模型名称 |
-| `size` | - | 图片尺寸 |
-| `quality` | `low` | 质量：low / medium / high |
+| `size` | - | 图片尺寸（宽高必须是 16 的倍数） |
+| `quality` | `low` | 质量：low / medium / high / auto |
 | `background` | - | 背景：opaque / auto / transparent |
 | `output_format` | `png` | 输出格式（上游始终返回 PNG） |
-| `output_compression` | - | 压缩率 0-100（PNG 只支持 100） |
+| `output_compression` | - | 压缩率 0-100（仅 jpeg/webp） |
 | `n` | `1` | 生成数量（上游始终返回 1） |
 | `moderation` | `low` | 审核级别：auto / low |
 | `response_format` | `b64_json` | 响应格式 |
 | `mask` | - | 改图时的 mask 图（仅本地路径/URL/data URL） |
+| `ref` | - | 额外参考图（可重复传入，多参考图编辑） |
 
 ## 自然语言映射
 
@@ -97,13 +97,16 @@ edits API (`/v1/images/edits`) **一次只能处理一张基础图 (`--image`) +
 | 高清 / 高质量 / 高品质 | quality=high |
 | 中等质量 | quality=medium |
 | 低质量 | quality=low |
+| 自动 / auto | quality=auto |
 
 ### background
 | 用户说法 | API 参数 |
 |---------|---------|
 | 透明背景 | background=transparent |
-| 白色背景 | background=white |
-| 黑色背景 | background=black |
+| 自动背景 | background=auto |
+| 不透明背景 | background=opaque |
+
+> ⚠️ `gpt-image-2` 不支持 `transparent`，脚本会自动拦截并报错。
 
 ### output_format
 | 用户说法 | API 参数 |
