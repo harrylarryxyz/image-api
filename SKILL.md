@@ -1,12 +1,12 @@
 ---
-name: image-api
-description: Generate and edit images using Image API. Generic wrapper that works with any OpenAI-compatible image provider. Handles auth via env vars, retry on transient failures, resolution constraints, prompt verbatim passing, and content moderation.
+name: image_api
+description: Generate and edit images using image_api. Generic wrapper that works with any OpenAI-compatible image provider. Handles auth via env vars, retry on transient failures, resolution constraints, prompt verbatim passing, and content moderation.
 version: 4.1.0
 ---
 
-# Image API
+# image_api
 
-使用 Image API 生成或编辑图片。不绑定任何 provider，通过环境变量配置。
+使用 image_api 生成或编辑图片。不绑定任何 provider，通过环境变量配置。
 
 ## Agent 行为规范
 
@@ -31,16 +31,43 @@ version: 4.1.0
 **文生图：**
 ```bash
 source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image-api/scripts/image_api.py --json "<prompt>" --size <size> --quality low --format png --moderation low
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "<prompt>" --size <size> --quality low --format png --moderation low
 ```
 
 **改图：**
 ```bash
 source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image "<path>" "<prompt>" --size <size> --quality low --format png --moderation low
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image "<path>" "<prompt>" --size <size> --quality low --format png --moderation low
 ```
 
-**多参考图编辑：**\n```bash\nsource ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE\npython3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image \"<main>\" --ref \"<ref1>\" --ref \"<ref2>\" \"<prompt>\" --size <size> --quality low --format png --moderation low\n```\n\n## 默认参数
+**多参考图编辑：**
+```bash
+source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image "<main>" --ref "<ref1>" --ref "<ref2>" "<prompt>" --size <size> --quality low --format png --moderation low
+```
+
+## API 模式
+
+Provider-specific notes for freemodel `/responses` compatibility and the auto-detection strategy are captured in `references/freemodel-responses-api.md`.
+
+支持两种互不混用的后端模式：
+
+- `images`：原始 OpenAI Images API，走 `/images/generations` 与 `/images/edits`，保持原功能不变。
+- `responses`：Responses API，走 `/responses` + `image_generation` tool，支持 freemodel/gpt-5.5 文生图、改图、多参考图、mask。
+- `auto`：默认模式。若 `IMAGE_API_MODE=responses` 或 `IMAGE_API_BASE` 直接写到 `/responses`，自动使用 `responses` 并把 base 规范化为 `/v1`；否则先尝试 `images`。如果 `/images/*` endpoint 不存在或返回空图片，再自动切到 `responses` 重试。
+
+自动纠错规则：如果 base 指向 `/responses` 却强制 `--api-mode images`，脚本会拒绝执行，避免把 Images API endpoint 拼成错误路径。
+
+freemodel 推荐配置：
+```bash
+IMAGE_API_BASE=https://api.freemodel.dev/v1/responses
+IMAGE_API_KEY=<key>
+IMAGE_MODEL=gpt-5.5
+```
+
+responses 模式注意：`n>1`、`background=transparent` 暂不发送到上游；需要多张图时循环多次请求。保存文件时按图片 magic header 判断真实格式，避免 provider 声称 webp 但实际返回 png。
+
+## 默认参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -112,3 +139,5 @@ python3 ~/.hermes/skills/image-api/scripts/image_api.py --json --edit --image "<
 - `references/provider-quirks.md` — Provider 非标准行为
 - `references/resolution-guide.md` — 分辨率约束完整数据
 - `references/image-delivery-debugging.md` — 用户说"图片没收到"时的诊断流程
+- `references/freemodel-responses.md` — freemodel/gpt-5.5 Responses API 图片生成、改图、mask、参数兼容与防混用规则
+- `references/freemodel-responses-api.md` — freemodel `/v1/responses` + `gpt-5.5` 图片生成/改图兼容性、参数映射与适配注意事项

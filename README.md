@@ -1,6 +1,6 @@
-# Image API
+# image_api
 
-通用图片生成与编辑工具，基于 OpenAI Image API (`/v1/images/generations` + `/v1/images/edits`)。
+通用图片生成与编辑工具，基于 OpenAI image_api (`/v1/images/generations` + `/v1/images/edits`)。
 
 **轻量依赖**，Python + requests，不绑死任何 provider。
 
@@ -20,19 +20,18 @@
 ## 快速开始
 
 ```bash
-# 1. 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入你的 API 端点和密钥
+# 1. 配置环境变量（Hermes 推荐放在全局 ~/.hermes/.env）
+# 编辑 ~/.hermes/.env，填入 IMAGE_API_BASE 和 IMAGE_API_KEY
 
 # 2. 文生图
-source .env
-python3 scripts/image_api.py --json "A beautiful sunset" --size 1024x1024 --quality high
+source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "A beautiful sunset" --size 1024x1024 --quality high
 
 # 3. 改图
-python3 scripts/image_api.py --json "Make it blue" --edit --image source.png
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "Make it blue" --edit --image source.png
 
 # 4. 多参考图编辑
-python3 scripts/image_api.py --json --edit --image main.png --ref ref1.png --ref ref2.png "Combine these"
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image main.png --ref ref1.png --ref ref2.png "Combine these"
 ```
 
 ## 输出格式
@@ -80,6 +79,24 @@ python3 scripts/image_api.py --json --edit --image main.png --ref ref1.png --ref
 | `IMAGE_API_KEY` | API 密钥 | ✅ |
 | `IMAGE_MODEL` | 默认模型 | 否 (默认 gpt-image-2) |
 | `IMAGE_OUT_DIR` | 输出目录 | 否 (默认 /tmp/gptimage) |
+| `IMAGE_API_MODE` | `auto` / `images` / `responses` | 否 (默认 auto) |
+
+## API 模式
+
+- `images`：保持原始 OpenAI Images API 行为，生成走 `/images/generations`，编辑走 `/images/edits`。
+- `responses`：走 `/responses` + `image_generation` tool，适合 freemodel/gpt-5.5 这类只开放 Responses 图片能力的 provider。
+- `auto`：如果 `IMAGE_API_MODE=responses` 或 `IMAGE_API_BASE` 以 `/responses` 结尾，自动切到 responses 并规范化 base；否则先尝试 images。如果 `/images/*` endpoint 不存在或返回空图片，再自动切到 responses 重试。
+
+freemodel 示例：
+
+```bash
+IMAGE_API_BASE=https://api.freemodel.dev/v1/responses
+IMAGE_API_KEY=...
+IMAGE_MODEL=gpt-5.5
+python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "A cat" --api-mode auto
+```
+
+防混用：base 指向 `/responses` 时强制 `--api-mode images` 会直接报错，不会错误拼接 `/responses/images/generations`。
 
 ## 分辨率约束
 
@@ -92,7 +109,7 @@ python3 scripts/image_api.py --json --edit --image main.png --ref ref1.png --ref
 ## 项目结构
 
 ```
-image-api/
+image_api/
 ├── README.md
 ├── SKILL.md              # Agent skill 文档
 ├── CHANGELOG.md          # 版本变更记录

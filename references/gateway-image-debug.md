@@ -33,7 +33,7 @@ grep -i "error\|failed\|skipping" ~/.hermes/logs/gateway.log | tail -10
 - **多轮对话中图片丢失** — 第一张图成功，后续图被 provider 丢弃（provider 端行为不稳定）
 
 ## 解决方案
-找到本地图片路径后，直接用 image-api 的 `--edit --image "<path>"` 模式传入参考图，绕过模型上下文的限制。
+找到本地图片路径后，直接用 image_api 的 `--edit --image "<path>"` 模式传入参考图，绕过模型上下文的限制。
 
 ## 关键路径
 - 图片缓存：`~/.hermes/image_cache/`

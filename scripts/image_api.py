@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image API - 通用封装 v4.1.0
-基于 OpenAI Image API (Generations + Edits)
+image_api - 通用封装 v4.1.0
+基于 OpenAI image_api (Generations + Edits)
 
 API: /v1/images/generations  生成
 API: /v1/images/edits        编辑
@@ -36,7 +36,7 @@ import time
 import uuid
 import re
 import mimetypes
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Literal
 from dataclasses import dataclass
 
 try:
@@ -52,6 +52,7 @@ except ImportError:
 DEFAULT_OUTDIR = os.environ.get("IMAGE_OUT_DIR", "/tmp/gptimage")
 DEFAULT_TIMEOUT = 900
 DEFAULT_MODEL = os.environ.get("IMAGE_MODEL", "gpt-image-2")
+DEFAULT_API_MODE = os.environ.get("IMAGE_API_MODE", "auto").lower()
 MAX_RETRIES = 2
 RETRY_DELAY = 5  # seconds
 
@@ -69,6 +70,18 @@ API_BASE: Optional[str] = None
 API_KEY: Optional[str] = None
 
 
+class UnsupportedResponsesOption(ValueError):
+    """Raised when auto fallback to Responses would use known-unsupported options."""
+
+
+def _normalize_base_url(base_url: str) -> Tuple[str, bool]:
+    """Return (normalized_base_url, base_points_to_responses)."""
+    cleaned = base_url.rstrip("/")
+    if cleaned.endswith("/responses"):
+        return cleaned[: -len("/responses")], True
+    return cleaned, False
+
+
 def ensure_runtime_config() -> Tuple[str, str]:
     """延迟读取环境变量，首次实际调用时才初始化。"""
     global API_BASE, API_KEY
@@ -76,7 +89,8 @@ def ensure_runtime_config() -> Tuple[str, str]:
         return API_BASE, API_KEY
 
     missing = []
-    base_url = os.environ.get("IMAGE_API_BASE", "").rstrip("/")
+    raw_base_url = os.environ.get("IMAGE_API_BASE", "").rstrip("/")
+    base_url, _ = _normalize_base_url(raw_base_url)
     api_key = os.environ.get("IMAGE_API_KEY", "")
     if not base_url:
         missing.append("IMAGE_API_BASE")
@@ -84,9 +98,9 @@ def ensure_runtime_config() -> Tuple[str, str]:
         missing.append("IMAGE_API_KEY")
     if missing:
         raise RuntimeError(
-            "Image API 尚未配置：缺少 " + ", ".join(missing) + "。"
-            "请在 skill 目录创建 .env：复制 .env.example 为 .env，"
-            "然后填写 IMAGE_API_BASE 和 IMAGE_API_KEY。"
+            "image_api 尚未配置：缺少 " + ", ".join(missing) + "。"
+            "请在 ~/.hermes/.env 中配置 IMAGE_API_BASE 和 IMAGE_API_KEY，"
+            "运行时用 `source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE` 注入环境变量。"
             "例如 IMAGE_API_BASE=http://api.example.com/v1。"
         )
 
@@ -96,6 +110,127 @@ def ensure_runtime_config() -> Tuple[str, str]:
         "Authorization": f"Bearer {API_KEY}",
     })
     return API_BASE, API_KEY
+
+
+def resolve_api_mode(mode: str = "auto") -> str:
+    """Resolve API mode without mixing incompatible endpoints.
+
+    - images: use /images/generations and /images/edits.
+    - responses: use /responses + image_generation tool.
+    - auto: infer responses when IMAGE_API_MODE=responses or IMAGE_API_BASE ends with /responses;
+      otherwise keep the original Images API behavior.
+    """
+    requested = (mode or DEFAULT_API_MODE or "auto").lower()
+    if requested not in {"auto", "images", "responses"}:
+        raise ValueError(f"无效 API 模式: {mode}，必须是 auto/images/responses")
+    raw_base = os.environ.get("IMAGE_API_BASE", "")
+    _, base_is_responses = _normalize_base_url(raw_base)
+    if requested == "auto":
+        env_mode = (os.environ.get("IMAGE_API_MODE") or "").lower()
+        if env_mode in {"images", "responses"}:
+            requested = env_mode
+        elif base_is_responses:
+            requested = "responses"
+        else:
+            requested = "images"
+    if requested == "images" and base_is_responses:
+        raise ValueError("IMAGE_API_BASE 指向 /responses，但 API 模式是 images；请改为 IMAGE_API_MODE=responses 或把 base 改为 /v1")
+    ensure_runtime_config()
+    return requested
+
+
+def _file_to_data_url(path: str) -> str:
+    resolved = _prepare_image_source(path)
+    try:
+        mime = _guess_mime(resolved)
+        with open(resolved, "rb") as f:
+            return f"data:{mime};base64," + base64.b64encode(f.read()).decode("ascii")
+    finally:
+        if resolved != path and os.path.exists(resolved):
+            os.unlink(resolved)
+
+
+def _responses_tool_payload(
+    *,
+    size: Optional[str] = None,
+    quality: Optional[str] = None,
+    n: int = 1,
+    fmt: Optional[str] = None,
+    output_compression: Optional[int] = None,
+    background: Optional[str] = None,
+    moderation: Optional[str] = None,
+    mask: Optional[str] = None,
+    action: Optional[str] = None,
+) -> Dict[str, Any]:
+    tool: Dict[str, Any] = {"type": "image_generation"}
+    if action:
+        tool["action"] = action
+    if size:
+        tool["size"] = size
+    if quality:
+        tool["quality"] = quality
+    if n and n != 1:
+        raise UnsupportedResponsesOption("responses 模式当前不支持 n>1；请循环多次请求生成多张图")
+    if fmt:
+        tool["output_format"] = fmt
+    if output_compression is not None:
+        tool["output_compression"] = output_compression
+    if background:
+        if background == "transparent":
+            raise UnsupportedResponsesOption("responses 模式当前不稳定支持 background=transparent；请使用 opaque/auto 或省略")
+        tool["background"] = background
+    if moderation:
+        tool["moderation"] = moderation
+    if mask:
+        tool["input_image_mask"] = {"image_url": _file_to_data_url(mask)}
+    return tool
+
+
+def _responses_generate_payload(prompt: str, config: "ImageGenConfig") -> Dict[str, Any]:
+    return {
+        "model": config.model,
+        "input": prompt,
+        "tools": [_responses_tool_payload(
+            size=config.size,
+            quality=config.quality,
+            n=config.n,
+            fmt=config.format,
+            output_compression=config.output_compression,
+            background=config.background,
+            moderation=config.moderation,
+        )],
+    }
+
+
+def _responses_edit_payload(prompt: str, image: str, mask: Optional[str], config: "ImageEditConfig") -> Dict[str, Any]:
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    for item in [image, *(config.refs or [])]:
+        content.append({"type": "input_image", "image_url": _file_to_data_url(item)})
+    return {
+        "model": config.model,
+        "input": [{"role": "user", "content": content}],
+        "tools": [_responses_tool_payload(
+            size=config.size,
+            quality=config.quality,
+            n=config.n,
+            fmt=config.format,
+            output_compression=config.output_compression,
+            background=config.background,
+            moderation=config.moderation,
+            mask=mask,
+        )],
+    }
+
+
+def _save_responses_images(resp: Dict[str, Any], prompt: str, outdir: str, prefix: Optional[str] = None, expected_n: int = 1):
+    data: List[Dict[str, Any]] = []
+    for item in resp.get("output", []) or []:
+        if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+            continue
+        b64 = item.get("result") or item.get("b64_json")
+        if b64:
+            data.append({"b64_json": b64, "revised_prompt": item.get("revised_prompt")})
+    return _save_images({"data": data}, prompt, outdir, prefix, expected_n=expected_n)
 
 
 # requests Session（复用连接）
@@ -122,7 +257,7 @@ def _validate_image_options(
     output_compression: Optional[int] = None,
     background: Optional[str] = None,
 ) -> None:
-    """Validate options against current GPT Image API constraints before sending."""
+    """Validate options against current GPT image_api constraints before sending."""
     if quality and quality not in VALID_QUALITIES:
         raise ValueError(f"quality 必须是 {sorted(VALID_QUALITIES)} 之一")
     if background and background not in VALID_BACKGROUNDS:
@@ -199,6 +334,7 @@ class ImageGenConfig:
     timeout: int = DEFAULT_TIMEOUT
     outdir: str = DEFAULT_OUTDIR
     filename_prefix: Optional[str] = None
+    api_mode: str = DEFAULT_API_MODE
 
     def to_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -242,6 +378,7 @@ class ImageEditConfig:
     timeout: int = DEFAULT_TIMEOUT
     outdir: str = DEFAULT_OUTDIR
     filename_prefix: Optional[str] = None
+    api_mode: str = DEFAULT_API_MODE
 
 
 # =============================================================================
@@ -658,6 +795,29 @@ def _sleep_with_countdown(seconds: int, label: str = "重试") -> None:
     time.sleep(seconds)
 
 
+def _looks_like_missing_endpoint(error_msg: str) -> bool:
+    """Only fallback across API families when the endpoint itself is missing.
+
+    Do not fallback on auth, quota, moderation, schema, or upstream errors: those
+    are real failures and switching API families would hide the true cause.
+    """
+    msg = (error_msg or "").lower()
+    if "404" not in msg:
+        return False
+    endpoint_markers = ["not found", "no route", "cannot post", "unknown endpoint", "endpoint"]
+    return any(marker in msg for marker in endpoint_markers)
+
+
+def _switch_generate_to_responses(prompt: str, config: ImageGenConfig) -> Tuple[str, Dict[str, Any], Any, str]:
+    payload = _responses_generate_payload(prompt, config)
+    return "/responses", payload, _save_responses_images, "responses"
+
+
+def _switch_edit_to_responses(prompt: str, image: str, mask: Optional[str], config: ImageEditConfig) -> Tuple[str, Dict[str, Any], Any, str]:
+    payload = _responses_edit_payload(prompt, image, mask, config)
+    return "/responses", payload, _save_responses_images, "responses"
+
+
 # =============================================================================
 # 主要 API 函数（带重试）
 # =============================================================================
@@ -680,12 +840,23 @@ def generate(
         background=config.background,
     )
 
-    payload = config.to_payload()
-    payload["prompt"] = prompt
+    api_mode = resolve_api_mode(config.api_mode)
+    if api_mode == "responses":
+        payload = _responses_generate_payload(prompt, config)
+        endpoint = "/responses"
+        saver = _save_responses_images
+    else:
+        payload = config.to_payload()
+        payload["prompt"] = prompt
+        endpoint = "/images/generations"
+        saver = _save_images
 
     if not silent:
         print(f"[生成] {prompt[:50]}...")
-        print(f"    参数: size={config.size or 'default'} quality={config.quality or 'default'} n={config.n}")
+        print(f"    模式: {api_mode} 参数: size={config.size or 'default'} quality={config.quality or 'default'} n={config.n}")
+
+    requested_auto = (config.api_mode or DEFAULT_API_MODE or "auto").lower() == "auto"
+    fallback_tried = api_mode == "responses"
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -693,23 +864,45 @@ def generate(
             _sleep_with_countdown(RETRY_DELAY, f"第{attempt}次重试")
 
         start = time.time()
-        resp = _request_json("/images/generations", payload, timeout=config.timeout)
+        resp = _request_json(endpoint, payload, timeout=config.timeout)
         elapsed = time.time() - start
 
         if not silent:
-            print(f"    端点: {ensure_runtime_config()[0]}")
+            print(f"    端点: {ensure_runtime_config()[0]}{endpoint}")
 
         err = _parse_error(resp)
         if err:
+            if requested_auto and not fallback_tried and api_mode == "images" and _looks_like_missing_endpoint(err):
+                if not silent:
+                    print("    [↪] Images API endpoint 不存在，auto 切换到 Responses API 后重试")
+                try:
+                    endpoint, payload, saver, api_mode = _switch_generate_to_responses(prompt, config)
+                except UnsupportedResponsesOption:
+                    last_error = err
+                    raise RuntimeError(f"生成失败: {err}")
+                fallback_tried = True
+                last_error = err
+                continue
             last_error = err
             if attempt < MAX_RETRIES and _is_retryable_error(err):
                 print(f"    [⚠️] 第{attempt + 1}次失败: {err}，将重试...", file=sys.stderr)
                 continue
             else:
                 raise RuntimeError(f"生成失败: {err}")
+        if requested_auto and not fallback_tried and api_mode == "images" and not (resp.get("data") or []):
+            try:
+                endpoint, payload, saver, api_mode = _switch_generate_to_responses(prompt, config)
+            except UnsupportedResponsesOption:
+                pass
+            else:
+                fallback_tried = True
+                last_error = "Images API 响应中没有图片数据"
+                continue
 
         # 成功
-        images = _save_images(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
+        images = saver(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
+        for img in images:
+            setattr(img, "provider_mode", api_mode)
         if not images:
             raise RuntimeError("响应中没有图片数据")
 
@@ -749,45 +942,83 @@ def edit(
             print(f"    mask: {mask}")
         print(f"    参数: size={config.size or 'default'} quality={config.quality or 'default'}")
 
+    api_mode = resolve_api_mode(config.api_mode)
+    if api_mode == "responses":
+        payload = _responses_edit_payload(prompt, image, mask, config)
+        endpoint = "/responses"
+        saver = _save_responses_images
+    else:
+        payload = None
+        endpoint = "/images/edits"
+        saver = _save_images
+
+    requested_auto = (config.api_mode or DEFAULT_API_MODE or "auto").lower() == "auto"
+    fallback_tried = api_mode == "responses"
+
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         if attempt > 0:
             _sleep_with_countdown(RETRY_DELAY, f"第{attempt}次重试")
 
         start = time.time()
-        resp = _request_multipart(
-            "/images/edits",
-            prompt=prompt,
-            image_path=image,
-            extra_image_paths=config.refs,
-            mask_path=mask,
-            model=config.model,
-            size=config.size,
-            quality=config.quality,
-            n=config.n,
-            fmt=config.format,
-            output_compression=config.output_compression,
-            background=config.background,
-            response_format=config.response_format,
-            timeout=config.timeout,
-            moderation=config.moderation,
-        )
+        if api_mode == "responses":
+            resp = _request_json(endpoint, payload, timeout=config.timeout)
+        else:
+            resp = _request_multipart(
+                endpoint,
+                prompt=prompt,
+                image_path=image,
+                extra_image_paths=config.refs,
+                mask_path=mask,
+                model=config.model,
+                size=config.size,
+                quality=config.quality,
+                n=config.n,
+                fmt=config.format,
+                output_compression=config.output_compression,
+                background=config.background,
+                response_format=config.response_format,
+                timeout=config.timeout,
+                moderation=config.moderation,
+            )
         elapsed = time.time() - start
 
         if not silent:
-            print(f"    端点: {ensure_runtime_config()[0]}")
+            print(f"    端点: {ensure_runtime_config()[0]}{endpoint}")
 
         err = _parse_error(resp)
         if err:
+            if requested_auto and not fallback_tried and api_mode == "images" and _looks_like_missing_endpoint(err):
+                if not silent:
+                    print("    [↪] Images API endpoint 不存在，auto 切换到 Responses API 后重试")
+                try:
+                    endpoint, payload, saver, api_mode = _switch_edit_to_responses(prompt, image, mask, config)
+                except UnsupportedResponsesOption:
+                    last_error = err
+                    raise RuntimeError(f"编辑失败: {err}")
+                fallback_tried = True
+                last_error = err
+                continue
             last_error = err
             if attempt < MAX_RETRIES and _is_retryable_error(err):
                 print(f"    [⚠️] 第{attempt + 1}次失败: {err}，将重试...", file=sys.stderr)
                 continue
             else:
                 raise RuntimeError(f"编辑失败: {err}")
+        if requested_auto and not fallback_tried and api_mode == "images" and not (resp.get("data") or []):
+            try:
+                endpoint, payload, saver, api_mode = _switch_edit_to_responses(prompt, image, mask, config)
+            except UnsupportedResponsesOption:
+                pass
+            else:
+                fallback_tried = True
+                last_error = "Images API 响应中没有图片数据"
+                continue
 
         # 成功
-        images = _save_images(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
+        images = saver(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
+        for img in images:
+            setattr(img, "provider_mode", api_mode)
         if not images:
             raise RuntimeError("响应中没有图片数据")
 
@@ -837,7 +1068,7 @@ def quick_edit(
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Image API 图片生成与编辑",
+        description="image_api 图片生成与编辑",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 环境变量:
@@ -882,6 +1113,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=900, help="超时秒数")
     parser.add_argument("--validate-mask", action="store_true", help="编辑前检查 mask 尺寸/alpha")
     parser.add_argument("--fix-mask-alpha", action="store_true", help="mask 无 alpha 时自动转为 RGBA alpha mask（需要 Pillow）")
+    parser.add_argument("--api-mode", choices=["auto", "images", "responses"], default=DEFAULT_API_MODE, help="API 模式：images 使用 /images/*；responses 使用 /responses + image_generation；auto 根据 IMAGE_API_MODE 或 base URL 自动识别")
     parser.add_argument("--json", action="store_true", help="JSON 结构化输出模式（用于程序化调用）")
 
     args = parser.parse_args()
@@ -923,6 +1155,7 @@ def main():
             timeout=args.timeout,
             outdir=args.outdir,
             filename_prefix=args.prefix,
+            api_mode=args.api_mode,
         )
     else:
         config = ImageGenConfig(
@@ -937,6 +1170,7 @@ def main():
             timeout=args.timeout,
             outdir=args.outdir,
             filename_prefix=args.prefix,
+            api_mode=args.api_mode,
         )
 
     try:
@@ -957,6 +1191,7 @@ def main():
                     "output_format": args.fmt or "png",
                     "n": args.n,
                     "moderation": args.moderation or "low",
+                    "api_mode": ("responses" if getattr(images[0], "provider_mode", None) == "responses" else resolve_api_mode(args.api_mode)),
                 },
                 "endpoint": ensure_runtime_config()[0],
             }
