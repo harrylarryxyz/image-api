@@ -335,7 +335,7 @@ The client validates common provider constraints before sending requests:
 - aspect ratio should be `<= 3:1`
 - very large portrait sizes may be provider-dependent even when they pass local validation
 
-See `references/resolution-guide.md` for more detail.
+See `references/api/resolution-guide.md` for more detail.
 
 ## Testing
 
@@ -375,13 +375,17 @@ image_api/
 ├── tests/
 │   └── test_responses_mode.py
 └── references/
-    ├── fields.md
-    ├── provider-quirks.md
-    ├── resolution-guide.md
-    ├── cpa-provider-quirks.md
-    ├── gateway-image-debug.md
-    ├── image-delivery-debugging.md
-    └── provider-specific compatibility notes
+    ├── api/
+    │   ├── fields.md
+    │   └── resolution-guide.md
+    ├── providers/
+    │   ├── provider-quirks.md
+    │   ├── generic-images-api-quirks.md
+    │   ├── responses-api-compatibility.md
+    │   └── responses-only-provider.md
+    └── troubleshooting/
+        ├── gateway-image-debug.md
+        └── image-delivery-debugging.md
 ```
 
 ## Security notes
