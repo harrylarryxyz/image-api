@@ -1,5 +1,7 @@
 # image_api
 
+English | [简体中文](README.zh-CN.md)
+
 `image_api` is a lightweight Hermes skill and CLI for image generation and image editing through OpenAI-compatible providers.
 
 It is designed for provider-agnostic use: configure a base URL, API key, and model, then use the same CLI for text-to-image, image editing, multi-reference editing, masks, and structured JSON output. It supports both the classic Images API shape and the newer Responses API image-generation tool shape, with safe auto-detection so users do not need to know which endpoint their provider exposes.

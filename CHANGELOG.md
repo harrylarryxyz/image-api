@@ -1,5 +1,7 @@
 # Changelog
 
+English | [简体中文](CHANGELOG.zh-CN.md)
+
 All notable changes to this project are documented in this file.
 
 This project follows a human-readable changelog style inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are used as project milestones; API-provider behavior may still vary by upstream provider.
