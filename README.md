@@ -1,130 +1,395 @@
 # image_api
 
-通用图片生成与编辑工具，基于 OpenAI image_api (`/v1/images/generations` + `/v1/images/edits`)。
+`image_api` is a lightweight Hermes skill and CLI for image generation and image editing through OpenAI-compatible providers.
 
-**轻量依赖**，Python + requests，不绑死任何 provider。
+It is designed for provider-agnostic use: configure a base URL, API key, and model, then use the same CLI for text-to-image, image editing, multi-reference editing, masks, and structured JSON output. It supports both the classic Images API shape and the newer Responses API image-generation tool shape, with safe auto-detection so users do not need to know which endpoint their provider exposes.
 
-## 特性
+## Highlights
 
-- 🖼️ **文生图** + ✏️ **改图**（支持本地文件/URL/data URL）
-- 🖼️ **多参考图编辑** — `--ref` 传入多张参考图，底层用 multipart `image[]`
-- 🔄 **自动重试** — 临时错误（429/502/超时）自动重试 2 次
-- 📊 **JSON 输出** — `--json` 模式输出结构化结果
-- 🔍 **双格式支持** — 同时支持 `b64_json` 和 `url` 响应格式（自动检测并下载）
-- 🛡️ **内容类型检查** — 检测 HTML 错误页面（网关错误/反爬拦截），给出明确提示
-- ✅ **参数预校验** — 尺寸 16 倍数、最大边、总像素、宽高比预检，不等 API 报错
-- 🎭 **Mask 校验与修复** — `--validate-mask` 检查尺寸/alpha，`--fix-mask-alpha` 自动修复灰度 mask
-- ⚡ **延迟配置加载** — `--help` 不再因缺 env 报错
-- 🔗 **请求追踪** — 每请求 UUID 追踪（`X-Client-Request-Id`）
+- Text-to-image generation via OpenAI-compatible Images API (`/images/generations`).
+- Image editing via Images API (`/images/edits`) with local files, remote URLs, or data URLs.
+- Responses API support via `/responses` plus `image_generation` tools.
+- `auto` API mode: try the standard Images API first, then fall back to Responses API only when the Images endpoint is missing or returns no image data.
+- Multi-reference editing with repeated `--ref` inputs.
+- Optional masks with validation and alpha-channel repair helpers.
+- Provider-safe parameter handling for size, quality, format, compression, background, moderation, and output count.
+- Response parsing for both `b64_json` and URL image payloads.
+- Magic-header output format detection, so saved file extensions reflect actual image bytes when providers mislabel formats.
+- Clear diagnostics for HTML/proxy responses, JSON errors, unsupported options, endpoint mismatches, and retryable upstream failures.
+- JSON output mode for Hermes, cron jobs, scripts, and other automation.
 
-## 快速开始
+## What this project is
 
-```bash
-# 1. 配置环境变量（Hermes 推荐放在全局 ~/.hermes/.env）
-# 编辑 ~/.hermes/.env，填入 IMAGE_API_BASE 和 IMAGE_API_KEY
+`image_api` is not a web server. It is a small Python CLI packaged as a Hermes skill:
 
-# 2. 文生图
-source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "A beautiful sunset" --size 1024x1024 --quality high
-
-# 3. 改图
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "Make it blue" --edit --image source.png
-
-# 4. 多参考图编辑
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image main.png --ref ref1.png --ref ref2.png "Combine these"
+```text
+README.md / SKILL.md / references/  -> usage and provider notes
+scripts/image_api.py                -> deterministic image API client
+tests/                              -> regression tests for API-mode behavior
 ```
 
-## 输出格式
+It intentionally keeps runtime dependencies minimal (`requests`; Pillow is optional for mask inspection/fixing).
+
+## Supported API modes
+
+`image_api` has three API modes:
+
+- `auto` — default. Uses configuration and provider behavior to choose the safest mode.
+- `images` — classic OpenAI Images API:
+  - generation: `POST /images/generations`
+  - editing: `POST /images/edits`
+- `responses` — OpenAI Responses API shape:
+  - `POST /responses`
+  - payload includes `tools: [{"type": "image_generation"}]`
+
+### Auto mode behavior
+
+For most users, leave this unset or set it to `auto`:
+
+```bash
+IMAGE_API_MODE=auto
+```
+
+Auto mode behaves as follows:
+
+1. If `IMAGE_API_MODE=responses`, use Responses API.
+2. If `IMAGE_API_BASE` ends with `/responses`, use Responses API and normalize the base URL internally.
+3. Otherwise, try the standard Images API first.
+4. If the Images endpoint is clearly unavailable, such as `404 Not Found`, or returns no image data, retry once using Responses API.
+5. Do not fall back on authentication errors, quota errors, request validation errors, content policy errors, timeouts, or generic upstream failures. Those should remain visible because switching endpoints would hide the real problem.
+
+This lets non-expert users configure a normal `/v1` base URL without knowing the provider's image endpoint details.
+
+## Installation
+
+### Hermes skill install from a local checkout
+
+```bash
+mkdir -p ~/.hermes/skills/image_api
+cp -R ./* ~/.hermes/skills/image_api/
+chmod +x ~/.hermes/skills/image_api/scripts/image_api.py
+```
+
+Then start a fresh Hermes session or explicitly load the skill:
+
+```text
+/skill image_api
+```
+
+### Direct CLI use
+
+You can also run the script directly from this repository:
+
+```bash
+python3 scripts/image_api.py --help
+```
+
+## Configuration
+
+Hermes convention is to keep secrets in the profile env file, usually:
+
+```text
+~/.hermes/.env
+```
+
+Check the active path with:
+
+```bash
+hermes config env-path
+```
+
+Recommended minimal configuration:
+
+```bash
+IMAGE_API_BASE=https://api.example.com/v1
+IMAGE_API_KEY=sk-your-provider-key
+IMAGE_MODEL=gpt-image-2
+IMAGE_API_MODE=auto
+```
+
+For a provider that exposes images only through a Responses-style endpoint, use the same generic shape:
+
+```bash
+IMAGE_API_BASE=https://api.example.com/v1
+IMAGE_API_KEY=sk-your-provider-key
+IMAGE_MODEL=your-image-capable-model
+IMAGE_API_MODE=auto
+```
+
+If a provider requires the endpoint path to be explicit, this also works:
+
+```bash
+IMAGE_API_BASE=https://api.example.com/v1/responses
+IMAGE_API_KEY=sk-your-provider-key
+IMAGE_MODEL=your-image-capable-model
+IMAGE_API_MODE=auto
+```
+
+Do not commit real keys. Examples should use placeholders such as `sk-your-provider-key`.
+
+## Environment variables
+
+- `IMAGE_API_BASE`: Provider base URL. Required. Prefer a generic `/v1` base when available.
+- `IMAGE_API_KEY`: Provider API key. Required.
+- `IMAGE_MODEL`: Default model. Optional; defaults to `gpt-image-2` when unset.
+- `IMAGE_API_MODE`: `auto`, `images`, or `responses`. Optional; defaults to `auto`.
+- `IMAGE_OUT_DIR`: Output directory. Optional; defaults to `/tmp/gptimage`.
+
+## Quick start
+
+Load env variables, then call the script:
+
+```bash
+set -a
+source ~/.hermes/.env
+set +a
+
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  "A clean vector-style blue checkmark icon on a white background" \
+  --size 1024x1024 \
+  --format png
+```
+
+The output is JSON when `--json` is used:
 
 ```json
 {
   "ok": true,
-  "paths": ["/tmp/gptimage/xxx.png"],
+  "paths": ["/tmp/gptimage/0520_120000_A_clean_vector_style_blue_check_0.png"],
   "used_params": {
+    "mode": "generate",
     "model": "gpt-image-2",
     "size": "1024x1024",
-    "quality": "high",
-    "n": 1
+    "quality": "low",
+    "output_format": "png",
+    "n": 1,
+    "moderation": "low",
+    "api_mode": "images"
   },
-  "endpoint": "https://your-provider.com/v1"
+  "endpoint": "https://api.example.com/v1"
 }
 ```
 
-## 参数
+`api_mode` may be `responses` when auto fallback selects the Responses API.
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `prompt` | 图片描述（必填） | - |
-| `--edit` | 改图模式 | 否 |
-| `--image` | 原图路径/URL/data URL（改图必填） | - |
-| `--ref` | 参考图，可重复传入（多参考图编辑） | - |
-| `--mask` | 遮罩图 | - |
-| `--size` | 尺寸（宽高必须是 16 的倍数） | 1024x1024 |
-| `--quality` | 质量 (low/medium/high/auto) | low |
-| `--n` | 生成数量 | 1 |
-| `--format` | 输出格式 (png/jpeg/webp) | - |
-| `--compression` | 压缩率 0-100（仅 jpeg/webp） | - |
-| `--background` | 背景 (opaque/auto/transparent) | - |
-| `--moderation` | 审核级别 (auto/low) | low |
-| `--validate-mask` | 编辑前检查 mask 尺寸/alpha | 否 |
-| `--fix-mask-alpha` | mask 无 alpha 时自动转 RGBA（需 Pillow） | 否 |
-| `--timeout` | 超时秒数 | 900 |
-| `--json` | JSON 输出模式 | 否 |
+## Common commands
 
-## 环境变量
-
-| 变量 | 说明 | 必填 |
-|------|------|------|
-| `IMAGE_API_BASE` | API 端点 | ✅ |
-| `IMAGE_API_KEY` | API 密钥 | ✅ |
-| `IMAGE_MODEL` | 默认模型 | 否 (默认 gpt-image-2) |
-| `IMAGE_OUT_DIR` | 输出目录 | 否 (默认 /tmp/gptimage) |
-| `IMAGE_API_MODE` | `auto` / `images` / `responses` | 否 (默认 auto) |
-
-## API 模式
-
-- `images`：保持原始 OpenAI Images API 行为，生成走 `/images/generations`，编辑走 `/images/edits`。
-- `responses`：走 `/responses` + `image_generation` tool，适合 freemodel/gpt-5.5 这类只开放 Responses 图片能力的 provider。
-- `auto`：如果 `IMAGE_API_MODE=responses` 或 `IMAGE_API_BASE` 以 `/responses` 结尾，自动切到 responses 并规范化 base；否则先尝试 images。如果 `/images/*` endpoint 不存在或返回空图片，再自动切到 responses 重试。
-
-freemodel 示例：
+### Text-to-image
 
 ```bash
-IMAGE_API_BASE=https://api.freemodel.dev/v1/responses
-IMAGE_API_KEY=...
-IMAGE_MODEL=gpt-5.5
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "A cat" --api-mode auto
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  "A minimalist product photo of a matte black water bottle" \
+  --size 1024x1024 \
+  --quality high \
+  --format png
 ```
 
-防混用：base 指向 `/responses` 时强制 `--api-mode images` 会直接报错，不会错误拼接 `/responses/images/generations`。
+### Image editing
 
-## 分辨率约束
-
-- 最长边 ≤ 3840
-- 总像素 655,360 ~ 8,294,400
-- 宽高都必须能被 16 整除
-- 宽高比 ≤ 3:1
-- 竖版实际最大 1920×3840（更大尺寸服务端可能超时）
-
-## 项目结构
-
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image source.png \
+  "Change the background to a soft studio gradient"
 ```
+
+### URL or data URL image input
+
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image https://example.com/source.png \
+  "Make the object blue while preserving shape"
+```
+
+### Multi-reference editing
+
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image main.png \
+  --ref palette.png \
+  --ref style-reference.png \
+  "Apply the color palette and style reference to the main image"
+```
+
+### Masked editing
+
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image source.png \
+  --mask mask.png \
+  --validate-mask \
+  "Replace only the masked region with a red umbrella"
+```
+
+If the mask lacks alpha information and Pillow is installed, you can repair it before upload:
+
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image source.png \
+  --mask gray-mask.png \
+  --fix-mask-alpha \
+  "Edit the masked area only"
+```
+
+### Force a specific API mode
+
+Most users should not need this. Use it when debugging provider behavior:
+
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --api-mode images \
+  "A small isometric house icon"
+
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --api-mode responses \
+  "A small isometric house icon"
+```
+
+## CLI parameters
+
+- `prompt`: Required text prompt or edit instruction.
+- `--edit`: Use edit mode.
+- `--image`: Primary image path, URL, or data URL. Required for edit mode.
+- `--ref`: Additional reference image. Repeatable.
+- `--mask`: Mask image path, URL, or data URL.
+- `--model`: Override `IMAGE_MODEL` for one call.
+- `--size`: Image size, default `1024x1024`. Also accepts provider-supported values such as `auto` where available.
+- `--quality`: `low`, `medium`, `high`, or `auto`.
+- `--n`: Number of images. Images API may support multiple outputs; Responses mode currently requires `1`.
+- `--format`: `png`, `jpeg`, or `webp`.
+- `--compression`: `0`-`100`, typically for `jpeg`/`webp` providers.
+- `--background`: `opaque`, `auto`, or `transparent`. Some Responses providers reject `transparent`; the client blocks known-unsafe combinations.
+- `--moderation`: `auto` or `low`.
+- `--outdir`, `-o`: Output directory.
+- `--prefix`: Optional filename prefix.
+- `--timeout`: Request timeout in seconds.
+- `--validate-mask`: Check mask size and alpha before editing.
+- `--fix-mask-alpha`: Convert grayscale mask to RGBA alpha mask when possible.
+- `--api-mode`: `auto`, `images`, or `responses`.
+- `--json`: Emit structured JSON for automation.
+
+## Output and file handling
+
+Generated files are written to `IMAGE_OUT_DIR`, `--outdir`, or `/tmp/gptimage`.
+
+The client saves images using the actual byte format, not only the provider-declared `output_format`. This matters because some providers may claim `webp` or `jpeg` while returning PNG bytes.
+
+Supported output byte signatures:
+
+- PNG: `89 50 4E 47`
+- JPEG: `FF D8 FF`
+- WebP: `RIFF .... WEBP`
+
+## Provider compatibility guidance
+
+Use generic configuration in public docs and examples. Provider-specific quirks should live in `references/` rather than being repeated throughout the README.
+
+A provider may differ in these areas:
+
+- whether image generation is exposed through Images API, Responses API, or both;
+- whether edit mode accepts multipart `image[]`, Responses `input_image`, or masks;
+- whether `n > 1` is supported;
+- whether `transparent` backgrounds are supported;
+- whether `quality`, `output_format`, and `compression` are honored exactly;
+- whether returned image bytes match the requested format.
+
+When adding a new provider, prefer:
+
+1. Configure `IMAGE_API_BASE` as a normal `/v1` URL.
+2. Leave `IMAGE_API_MODE=auto`.
+3. Run one text-to-image smoke test.
+4. Run one edit test if the provider claims edit support.
+5. Add a short provider note under `references/` only if behavior is non-standard.
+
+## Error handling and retry policy
+
+The client retries transient failures such as rate limits and gateway/server errors. It does not hide permanent errors.
+
+Auto fallback from Images API to Responses API is intentionally narrow:
+
+- Fallback is allowed for missing image endpoints or empty image payloads.
+- Fallback is not allowed for bad credentials, quota failures, invalid request parameters, content policy responses, timeouts, or general upstream errors.
+
+This makes configuration easier without masking real failures.
+
+## Resolution constraints
+
+The client validates common provider constraints before sending requests:
+
+- longest side: `<= 3840`
+- total pixels: approximately `655,360` to `8,294,400`
+- width and height must be divisible by `16`
+- aspect ratio should be `<= 3:1`
+- very large portrait sizes may be provider-dependent even when they pass local validation
+
+See `references/resolution-guide.md` for more detail.
+
+## Testing
+
+Run the regression tests:
+
+```bash
+python3 -m pytest tests/test_responses_mode.py -q
+python3 -m py_compile scripts/image_api.py
+```
+
+Optional live smoke test, assuming `~/.hermes/.env` contains valid provider credentials:
+
+```bash
+set -a
+source ~/.hermes/.env
+set +a
+
+python3 scripts/image_api.py \
+  --json \
+  "A tiny black plus icon on a white background" \
+  --size 1024x1024 \
+  --format png \
+  --outdir /tmp/gptimage_smoke
+```
+
+## Project structure
+
+```text
 image_api/
 ├── README.md
-├── SKILL.md              # Agent skill 文档
-├── CHANGELOG.md          # 版本变更记录
+├── SKILL.md
+├── CHANGELOG.md
 ├── LICENSE
-├── .env.example          # 环境变量模板
+├── .env.example
 ├── scripts/
-│   └── image_api.py      # 核心脚本
+│   └── image_api.py
+├── tests/
+│   └── test_responses_mode.py
 └── references/
-    ├── fields.md              # 字段映射与交互规范
-    ├── provider-quirks.md     # Provider 非标准行为
-    ├── resolution-guide.md    # 分辨率约束完整数据
-    ├── cpa-provider-quirks.md # CPA 特有行为
-    ├── gateway-image-debug.md # 网关图片调试
-    └── image-delivery-debugging.md  # 投递问题诊断
+    ├── fields.md
+    ├── provider-quirks.md
+    ├── resolution-guide.md
+    ├── cpa-provider-quirks.md
+    ├── gateway-image-debug.md
+    ├── image-delivery-debugging.md
+    └── provider-specific compatibility notes
 ```
+
+## Security notes
+
+- Keep API keys in `~/.hermes/.env` or another local secret store.
+- Do not commit `.env` files or real provider keys.
+- Use placeholders in docs and issues.
+- Treat generated images as user data; avoid uploading them elsewhere unless the user explicitly requests it.
 
 ## License
 

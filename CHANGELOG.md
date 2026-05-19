@@ -1,79 +1,144 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
+
+This project follows a human-readable changelog style inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are used as project milestones; API-provider behavior may still vary by upstream provider.
+
+## [Unreleased]
+
+### Added
+
+- Professionalized the public README as a provider-agnostic project entry point.
+- Expanded documentation for API modes, configuration, CLI parameters, output handling, provider compatibility, security, and testing.
+- Added generic provider examples using placeholder hosts and keys instead of real provider credentials.
+
+### Changed
+
+- Moved provider-specific guidance out of the main README narrative and into `references/` notes.
+- Clarified that `IMAGE_API_MODE=auto` is the recommended default for non-expert users.
+- Clarified the safe fallback policy: fallback from Images API to Responses API only for missing image endpoints or empty image payloads, not for authentication, quota, validation, content policy, timeout, or generic upstream errors.
+
+## [4.2.0] - 2026-05-20
+
+### Added
+
+- Added Responses API support through `POST /responses` with `tools: [{"type": "image_generation"}]`.
+- Added `--api-mode {auto,images,responses}` and matching `IMAGE_API_MODE` environment variable.
+- Added automatic API-mode detection:
+  - `IMAGE_API_MODE=responses` forces Responses API.
+  - `IMAGE_API_BASE` ending in `/responses` selects Responses API and normalizes the base URL internally.
+  - default `auto` mode first tries the standard Images API for normal `/v1` bases.
+- Added safe fallback from Images API to Responses API when `/images/*` is unavailable or returns no usable image data.
+- Added explicit protection against endpoint mixing, such as using an `/responses` base URL with forced `images` mode.
+- Added Responses-mode generation and edit support, including primary images, additional reference images, and mask payload construction.
+- Added provider-mode reporting in JSON output so automated callers can see whether `images` or `responses` was actually used.
+- Added byte-signature image format detection for PNG, JPEG, and WebP to avoid trusting mislabeled provider output.
+- Added regression tests for API-mode resolution, Responses payload construction, fallback behavior, and no-fallback authentication errors.
+- Added provider-specific reference notes for Responses-style image providers under `references/`.
+
+### Changed
+
+- Default API-mode behavior is now `auto`, making normal `/v1` provider configuration safer for non-expert users.
+- JSON output now reports the effective `api_mode` after fallback instead of only the initially resolved mode.
+- Responses mode now rejects known-unsupported options before sending requests, including multi-image count requests (`n > 1`) and unsupported transparent-background combinations.
+- Documentation now uses the underscore-safe skill identity `image_api` consistently for runtime paths and skill names.
+
+### Fixed
+
+- Fixed incorrect endpoint construction when a configured base URL already included `/responses`.
+- Fixed misleading success metadata when auto fallback selected Responses API after an Images API failure.
+- Fixed stale hyphenated runtime identity references in docs.
+- Fixed edge cases where provider-declared output format did not match returned image bytes.
+
+### Security
+
+- Documented that provider keys belong in local env files such as `~/.hermes/.env` and must not be committed.
+- Public README examples now use placeholders rather than real provider-specific keys or private test configuration.
 
 ## [4.1.0] - 2026-05-04
 
 ### Added
-- **多参考图编辑**: `--ref` 参数支持多次传入参考图，底层用 multipart `image[]` 发送
-- **参数预校验**: 尺寸必须 16 倍数、最长边 ≤ 3840px、总像素 655K~8.3M、宽高比 ≤ 3:1，不等 API 报错
-- **Mask 校验与修复**: `--validate-mask` 检查尺寸/alpha；`--fix-mask-alpha` 自动把灰度 mask 转 RGBA alpha mask（需要 Pillow）
-- **延迟配置加载**: `--help` 和参数校验不再因缺少环境变量而报错
-- **quality 新增 `auto` 选项**
-- **background 新增 `transparent` 选项**（gpt-image-2 自动拦截并报错）
-- **高质量投递规范**: 预览图 + 原文件双发，保留 Telegram 压缩前的画质
-- 新增 references: cpa-provider-quirks.md, gateway-image-debug.md, image-delivery-debugging.md
+
+- Multi-reference editing through repeated `--ref` arguments, sent as multipart `image[]` fields where supported.
+- Parameter pre-validation for common image constraints: dimensions divisible by 16, longest side limit, total pixel range, and aspect-ratio bounds.
+- Mask validation and repair helpers:
+  - `--validate-mask` checks dimensions and alpha suitability.
+  - `--fix-mask-alpha` converts grayscale masks into RGBA alpha masks when Pillow is available.
+- Lazy configuration loading so `--help` and basic argument validation no longer fail when env variables are absent.
+- `quality=auto` option.
+- `background=transparent` option with provider-specific validation where applicable.
+- High-quality delivery guidance for workflows that need both compressed previews and original files.
+- Reference documents for provider quirks, gateway image debugging, and image delivery troubleshooting.
 
 ### Changed
-- Multipart 请求从 dict 改为 list-of-tuples，支持同名 `image[]` 多字段
-- `_guess_mime` 从嵌套函数提升为模块级函数，配合 `mimetypes` 标准库
-- 配置从模块顶部立即读取改为 `ensure_runtime_config()` 延迟加载
+
+- Multipart request construction now uses list-of-tuples to support repeated field names.
+- MIME detection was promoted to a reusable helper backed by Python's `mimetypes` module.
+- Runtime config loading now happens through `ensure_runtime_config()` instead of import-time env reads.
 
 ## [4.0.0] - 2026-05-03
 
 ### Changed
-- **架构重构**: curl 子进程 → requests 原生调用，提升 edit 模式稳定性
-- `_curl_json` → `_request_json` (使用 `requests.Session.post`)
-- `_curl_multipart` → `_request_multipart` (使用 `requests` 原生 `files=` 参数)
-- 移除 `subprocess`、`tempfile`（curl 相关）依赖
-- 使用 `requests.Session` 复用连接，减少进程开销
+
+- Reworked the transport layer from curl subprocess calls to native `requests` calls.
+- Replaced `_curl_json` with `_request_json` using `requests.Session.post`.
+- Replaced `_curl_multipart` with native `requests` multipart uploads.
+- Removed curl-related subprocess/tempfile dependencies from the runtime path.
+- Added session-level connection reuse for lower overhead and more stable edit requests.
 
 ### Added
-- **MIME type 自动检测**: 根据文件扩展名上传 `image/png`、`image/jpeg` 等具体类型，不再使用 `application/octet-stream`
-- **请求追踪**: 每个请求生成 UUID，通过 `X-Client-Request-Id` 头传递
-- **详细错误诊断**: 错误信息包含 HTTP 状态码、Content-Type、Request-ID、CF-Ray
-- **连接复用**: Session 级别复用 HTTP 连接
+
+- MIME type auto-detection for uploaded images, avoiding generic `application/octet-stream` uploads where providers require concrete types.
+- Per-request UUID tracking through `X-Client-Request-Id`.
+- More detailed error diagnostics including HTTP status, content type, request id, and gateway metadata where available.
 
 ### Fixed
-- 修复 edit 模式 `NameError: name 'moderation' is not defined`（v3.x curl 架构遗留 bug）
-- 修复部分 provider 拒绝 `application/octet-stream` MIME type 的问题
-- 修复 edit 模式重试机制实际不生效的问题（旧版崩溃在重试逻辑之前）
+
+- Fixed edit-mode `NameError: name 'moderation' is not defined` inherited from the earlier curl implementation.
+- Fixed provider failures caused by generic upload MIME types.
+- Fixed edit-mode retry paths that could fail before retry logic was reached.
 
 ## [3.1.0] - 2026-05-01
 
 ### Added
-- **双格式支持**: 同时支持 `b64_json` 和 `url` 响应格式，自动检测并下载远程图片
-- **内容类型检查**: 检测 HTML 错误页面（网关错误/反爬拦截），给出明确错误提示而非 `JSON decode failed`
-- 新增 `_download_url()` 函数用于远程图片下载
-- 新增 `_check_response_headers()` 函数用于 content-type 验证
+
+- Support for both `b64_json` image responses and URL-based image responses.
+- Automatic download of remote image URLs returned by providers.
+- Content-type checks to catch HTML gateway/proxy pages before JSON parsing.
+- `_download_url()` helper for remote image retrieval.
+- `_check_response_headers()` helper for response validation.
 
 ### Fixed
-- 修复改图模式未传递 `moderation` 参数的问题
+
+- Fixed missing `moderation` parameter propagation in edit mode.
 
 ## [3.0.0] - 2026-04-30
 
 ### Changed
-- 重构为纯环境变量驱动，不再读取 config.yaml
-- 移除对特定 provider 的硬编码依赖
-- 支持主备双端点自动切换
+
+- Moved to environment-variable-driven configuration.
+- Removed hard-coded dependence on a single provider.
+- Added support for primary/backup endpoint patterns where configured.
 
 ### Added
-- 自动重试机制（429/502/503/504/timeout 最多重试 2 次）
-- `--json` 结构化输出模式
-- 支持 URL 和 data URL 作为图片来源
-- 分辨率约束实测数据
+
+- Retry mechanism for transient failures such as 429, 502, 503, 504, and timeouts.
+- Structured `--json` output mode.
+- URL and data URL support for image inputs.
+- Documented resolution constraints based on observed provider behavior.
 
 ## [2.0.0] - 2026-04-29
 
 ### Added
-- 改图功能（`/v1/images/edits` 端点）
-- 支持本地文件、URL、data URL 三种图片来源
-- mask 支持
+
+- Image editing through `POST /images/edits`.
+- Local file, URL, and data URL input support.
+- Mask support for edit workflows.
 
 ## [1.0.0] - 2026-04-28
 
 ### Added
-- 初始版本
-- 文生图功能（`/v1/images/generations` 端点）
-- CLI 参数支持
-- 环境变量配置
+
+- Initial text-to-image generation through `POST /images/generations`.
+- Basic CLI parameters.
+- Environment-variable configuration.

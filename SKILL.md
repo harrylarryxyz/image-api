@@ -48,24 +48,25 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image "<
 
 ## API 模式
 
-Provider-specific notes for freemodel `/responses` compatibility and the auto-detection strategy are captured in `references/freemodel-responses-api.md`.
+Provider-specific compatibility notes belong in `references/`; the runtime instructions below stay provider-agnostic.
 
-支持两种互不混用的后端模式：
+支持三种互不混用的后端模式：
 
 - `images`：原始 OpenAI Images API，走 `/images/generations` 与 `/images/edits`，保持原功能不变。
-- `responses`：Responses API，走 `/responses` + `image_generation` tool，支持 freemodel/gpt-5.5 文生图、改图、多参考图、mask。
+- `responses`：Responses API，走 `/responses` + `image_generation` tool，适合只通过 Responses 形态开放图片能力的 provider。
 - `auto`：默认模式。若 `IMAGE_API_MODE=responses` 或 `IMAGE_API_BASE` 直接写到 `/responses`，自动使用 `responses` 并把 base 规范化为 `/v1`；否则先尝试 `images`。如果 `/images/*` endpoint 不存在或返回空图片，再自动切到 `responses` 重试。
 
-自动纠错规则：如果 base 指向 `/responses` 却强制 `--api-mode images`，脚本会拒绝执行，避免把 Images API endpoint 拼成错误路径。
+自动纠错规则：如果 base 指向 `/responses` 却强制 `--api-mode images`，脚本会拒绝执行，避免把 Images API endpoint 拼成错误路径。不要因鉴权、配额、参数、内容安全、超时或通用上游错误而自动切模式；这些是真实错误，应直接暴露。
 
-freemodel 推荐配置：
+通用配置示例：
 ```bash
-IMAGE_API_BASE=https://api.freemodel.dev/v1/responses
-IMAGE_API_KEY=<key>
-IMAGE_MODEL=gpt-5.5
+IMAGE_API_BASE=https://api.example.com/v1
+IMAGE_API_KEY=sk-your-provider-key
+IMAGE_MODEL=your-image-capable-model
+IMAGE_API_MODE=auto
 ```
 
-responses 模式注意：`n>1`、`background=transparent` 暂不发送到上游；需要多张图时循环多次请求。保存文件时按图片 magic header 判断真实格式，避免 provider 声称 webp 但实际返回 png。
+responses 模式注意：`n>1`、部分 provider 的 `background=transparent` 可能不可用；需要多张图时循环多次请求。保存文件时按图片 magic header 判断真实格式，避免 provider 声称 webp 但实际返回 png。
 
 ## 默认参数
 
@@ -139,5 +140,5 @@ responses 模式注意：`n>1`、`background=transparent` 暂不发送到上游�
 - `references/provider-quirks.md` — Provider 非标准行为
 - `references/resolution-guide.md` — 分辨率约束完整数据
 - `references/image-delivery-debugging.md` — 用户说"图片没收到"时的诊断流程
-- `references/freemodel-responses.md` — freemodel/gpt-5.5 Responses API 图片生成、改图、mask、参数兼容与防混用规则
-- `references/freemodel-responses-api.md` — freemodel `/v1/responses` + `gpt-5.5` 图片生成/改图兼容性、参数映射与适配注意事项
+- `references/freemodel-responses.md` — provider-specific Responses API 图片生成、改图、mask、参数兼容与防混用规则
+- `references/freemodel-responses-api.md` — provider-specific `/v1/responses` 图片生成/改图兼容性、参数映射与适配注意事项
