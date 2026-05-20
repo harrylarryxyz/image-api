@@ -287,7 +287,23 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
 
 生成文件会写入 `IMAGE_OUT_DIR`、`--outdir` 或 `/tmp/gptimage`。
 
-客户端会根据实际图片字节保存文件，而不仅依赖 provider 声明的 `output_format`。这很重要，因为有些 provider 可能声称返回 `webp` 或 `jpeg`，但实际字节是 PNG。
+客户端会根据实际字节格式保存图片，而不是只信 provider 声称的 `output_format`。这很重要，因为一些 provider 可能声称返回 `webp` 或 `jpeg`，但实际返回 PNG 字节。
+
+### Hermes 聊天网关投递
+
+通过 Hermes 返回生成图片时，建议同时发送两种形式：
+
+1. **预览图** — 普通使用 `MEDIA:<path>` 发送 PNG/JPEG/WebP，让聊天 UI 内联预览。
+2. **原始文件附件** — 使用同一个图片路径按文件/文档附件发送，保留原始字节。不要为了避免预览压缩而把图片打成 zip。
+
+对于支持文档投递指令的 Telegram 等 Hermes 网关，使用 `[[as_document]]` 加同一个图片路径：
+
+```text
+[[as_document]]
+MEDIA:/tmp/gptimage/xxx.png
+```
+
+这会让图片扩展名文件走文件/文档投递，例如 Telegram `sendDocument`，而不是照片投递，例如 Telegram `sendPhoto`。
 
 支持的输出字节签名：
 

@@ -17,6 +17,7 @@
 
 ### Changed
 
+- 明确高质量聊天投递方式：普通 `MEDIA:<path>` 发送预览图，再用 `[[as_document]]` 将同一个图片路径按文档/文件附件发送，而不是打成 zip。
 - 将 provider-specific 说明从 README 主叙事移到 `references/` 笔记中。
 - 明确 `IMAGE_API_MODE=auto` 是非专家用户的推荐默认值。
 - 明确安全 fallback 策略：只有 Images API 端点缺失或图片 payload 为空时，才从 Images API fallback 到 Responses API；不会因鉴权、额度、参数校验、内容安全、超时或通用上游错误而 fallback。

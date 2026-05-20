@@ -289,6 +289,22 @@ Generated files are written to `IMAGE_OUT_DIR`, `--outdir`, or `/tmp/gptimage`.
 
 The client saves images using the actual byte format, not only the provider-declared `output_format`. This matters because some providers may claim `webp` or `jpeg` while returning PNG bytes.
 
+### Delivery from Hermes chat gateways
+
+When returning generated images through Hermes, prefer sending both forms:
+
+1. **Preview image** — send the PNG/JPEG/WebP normally with `MEDIA:<path>` so the chat UI can show an inline preview.
+2. **Original file attachment** — send the same image path as a document/file attachment so the original bytes are preserved. Do not wrap the image in a zip archive just to avoid preview compression.
+
+For Telegram and other Hermes gateways that honor document delivery directives, use `[[as_document]]` with the same image path:
+
+```text
+[[as_document]]
+MEDIA:/tmp/gptimage/xxx.png
+```
+
+This routes image-extension files through file/document delivery, such as Telegram `sendDocument`, instead of photo delivery, such as Telegram `sendPhoto`.
+
 Supported output byte signatures:
 
 - PNG: `89 50 4E 47`

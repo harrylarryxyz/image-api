@@ -16,6 +16,7 @@ This project follows a human-readable changelog style inspired by [Keep a Change
 
 ### Changed
 
+- Clarified high-quality chat delivery: send a normal `MEDIA:<path>` preview plus the same image path as a document/file attachment with `[[as_document]]`, not a zip archive.
 - Moved provider-specific guidance out of the main README narrative and into `references/` notes.
 - Clarified that `IMAGE_API_MODE=auto` is the recommended default for non-expert users.
 - Clarified the safe fallback policy: fallback from Images API to Responses API only for missing image endpoints or empty image payloads, not for authentication, quota, validation, content policy, timeout, or generic upstream errors.

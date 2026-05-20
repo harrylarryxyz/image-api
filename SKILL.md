@@ -91,8 +91,13 @@ responses 模式注意：`n>1`、部分 provider 的 `background=transparent` �
 成功后通过 `MEDIA:/tmp/gptimage/xxx.png` 发送。具体投递行为取决于当前 gateway。
 
 **高质量投递（推荐）：** 部分聊天平台会压缩图片消息。对于生成/编辑结果，尽量同时发送：
-1. 图片预览 — `send_message` 用 `MEDIA:` 路径，方便内联查看
-2. 原文件附件 — 同路径再发一次作为文件，保留原始画质
+1. 图片预览 — 普通 `MEDIA:<path>`，走图片/照片预览，方便内联查看
+2. 原文件附件 — **同一个图片路径按文件形式发送**，不要压成 zip。使用 `send_message` 时在消息里加 `[[as_document]]` 指令：
+   ```text
+   [[as_document]]
+   MEDIA:/tmp/gptimage/xxx.png
+   ```
+   这样 Telegram 会走 `sendDocument`，保留原始文件字节与画质。
 
 如果图片消息投递失败但文件存在，降级为发送文件附件。
 
