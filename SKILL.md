@@ -1,150 +1,256 @@
 ---
 name: image_api
-description: Generate and edit images using image_api. Generic wrapper that works with any OpenAI-compatible image provider. Handles auth via env vars, retry on transient failures, resolution constraints, prompt verbatim passing, and content moderation.
-version: 4.1.0
+description: "Use when user asks to generate, edit, reference, mask, verify, or deliver raster images through the image_api Hermes skill/CLI."
+version: 4.2.1
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [image-generation, image-editing, openai-compatible, responses-api, hermes-skill]
+    related_skills: [hermes-agent-skill-authoring, skill-creator, writing-skills]
 ---
 
 # image_api
 
-使用 image_api 生成或编辑图片。不绑定任何 provider，通过环境变量配置。
+## Overview
 
-## Agent 行为规范
+`image_api` 是一个 Hermes runtime skill + Python CLI，用来通过 OpenAI-compatible 图片接口生成图片、编辑图片、多参考图编辑和 mask 编辑。
 
-1. **直接执行** — 参数够就调用，不解释流程、不复盘步骤
-2. **缺字段才追问** — 只缺 prompt 或图片来源时才问用户，可选字段用默认值
-3. **完成即结束** — 成功就发图，失败就报错。不存 memory、不输出参数、不解释原理
-4. **Prompt 原样直传** — 不翻译、不优化、不扩展，除非用户明确要求
-5. **不为简单任务加戏** — "生成一张猫的图片" → 调脚本 → 发图 → 完
+本 `SKILL.md` 是 **agent runtime 行为契约**。它只保留执行时必须知道的路径、决策和安全边界；详细字段、provider 兼容性、故障排查和用户文档按需打开 `references/` 或 README。这是按 Skill Creator 的 progressive disclosure 原则整理后的结构。
 
-## 执行流程
+公共表面必须保持 provider-agnostic：不要写真实 provider、私有模型路由、真实 key、私有 chat id 或本地专用路径。canonical identity 始终是 `image_api`；保留 underscore，不把 `/skill image_api`、runtime 路径或示例改成 hyphen 形式。
 
-```
-① 判断：文生图(prompt) or 改图(prompt + image)
-② 缺必填字段 → 追问；够了 → 直接执行
-③ terminal 调用脚本（必须 --json）
-④ 成功 → MEDIA:发图；失败 → 报错
-⑤ 结束。不存 memory，不输出多余内容。
-```
+## When to Use
 
-## 调用命令
+使用本 skill：
 
-**文生图：**
+- 用户要求根据文字 prompt 生成 raster image。
+- 用户要求改图、换背景、把人物/物体放入场景，且提供图片路径、URL、data URL 或当前会话附件。
+- 用户提供多张参考图，需要主体图 + 额外参考图合成、迁移风格或保留主体。
+- 用户要求局部编辑、mask、透明背景、尺寸、质量、格式或数量参数。
+- 用户反馈图片没收到、质量被压缩、API 模式不匹配或 provider 返回非标准错误。
+
+不要使用本 skill：
+
+- 只描述、识别、OCR 或分析图片内容；使用 vision/OCR 工具。
+- 生成视频、音频、PPT、SVG 架构图或其他非 raster image；使用对应 skill。
+- 询问 Hermes `/fast`、priority processing、模型路由或 agent 配置；那不是图片快速基线。
+
+## Runtime Authority
+
+优先级：当前用户请求 > 当前附件/文件事实 > 本 `SKILL.md` > `references/` > README/CHANGELOG。
+
+核心规则：
+
+1. **参数足够就执行。** 缺 prompt 或编辑图片来源时才追问。
+2. **Prompt 原样直传。** 不翻译、不润色、不扩展，除非用户明确要求优化 prompt。
+3. **图片 + 文字默认是编辑/参考。** 直接用 `--edit --image`；不要先 vision 描述图片，除非用户要求识别/描述。
+4. **始终用 `--json`。** 解析 JSON，不只看退出码或 stdout 文本。
+5. **成功前验证文件。** 检查 `ok=true`、`paths` 非空、文件存在且 magic header 是 PNG/JPEG/WebP。
+6. **失败暴露真实错误。** 鉴权、额度、参数、内容安全、超时、通用 upstream 错误不要靠切 API 模式掩盖。
+7. **完成即交付。** 成功后发送图片/文件；失败给简短错误和下一步。不要输出 env、key、完整本地路径清单或 provider 私有信息。
+8. **不写临时任务进 memory。** 不保存生成结果、prompt、路径或失败记录，除非用户明确要求保存长期偏好。
+
+## Workflow
+
+1. **选择任务类型**
+   - 无图片输入：text-to-image generation，需要 prompt。
+   - 有图片输入：image edit/reference，需要 prompt + 主图。
+   - 有 mask：mask edit，加 `--mask`，必要时 `--validate-mask` 或 `--fix-mask-alpha`。
+
+2. **选择图片参数**
+   - 默认快速基线：`--quality low --size 1024x1024 --format png --moderation low`。
+   - 高清/高质量：`--quality high`。
+   - 正方形：`--size 1024x1024`；竖版：`1024x1536`；横版：`1536x1024`。
+   - 透明背景：`--background transparent`；若 provider/model 不支持，报告限制，不改 prompt。
+   - 生成多张：`--n N`；Responses 模式通常只支持单张，需要时循环请求。
+
+3. **执行并验证**
+   - 用 terminal 在稳定 `workdir` 中执行 CLI。
+   - 解析 JSON，验证本地文件和图片 magic header。
+   - 投递图片；如平台压缩或用户要原图，同时发送预览 + 原始文件附件。
+
+## Quick Recipes
+
+运行前加载 Hermes env：
+
 ```bash
-source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json "<prompt>" --size <size> --quality low --format png --moderation low
+ENV_FILE="$(hermes config env-path 2>/dev/null || printf '%s\n' ~/.hermes/.env)"
+set -a
+[ -f "$ENV_FILE" ] && source "$ENV_FILE"
+set +a
 ```
 
-**改图：**
+文生图：
+
 ```bash
-source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image "<path>" "<prompt>" --size <size> --quality low --format png --moderation low
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  "<prompt>" \
+  --size 1024x1024 \
+  --quality low \
+  --format png \
+  --moderation low
 ```
 
-**多参考图编辑：**
+单图编辑/参考图生成：
+
 ```bash
-source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE
-python3 ~/.hermes/skills/image_api/scripts/image_api.py --json --edit --image "<main>" --ref "<ref1>" --ref "<ref2>" "<prompt>" --size <size> --quality low --format png --moderation low
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image "<image-path-or-url>" \
+  "<prompt>" \
+  --size 1024x1024 \
+  --quality low \
+  --format png \
+  --moderation low
 ```
 
-## API 模式
+多参考图编辑：
 
-Provider-specific compatibility notes belong in `references/`; the runtime instructions below stay provider-agnostic.
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image "<primary-subject>" \
+  --ref "<reference-1>" \
+  --ref "<reference-2>" \
+  "<prompt>" \
+  --size 1024x1024 \
+  --quality low \
+  --format png \
+  --moderation low
+```
 
-支持三种互不混用的后端模式：
+mask 编辑：
 
-- `images`：原始 OpenAI Images API，走 `/images/generations` 与 `/images/edits`，保持原功能不变。
-- `responses`：Responses API，走 `/responses` + `image_generation` tool，适合只通过 Responses 形态开放图片能力的 provider。
-- `auto`：默认模式。若 `IMAGE_API_MODE=responses` 或 `IMAGE_API_BASE` 直接写到 `/responses`，自动使用 `responses` 并把 base 规范化为 `/v1`；否则先尝试 `images`。如果 `/images/*` endpoint 不存在或返回空图片，再自动切到 `responses` 重试。
+```bash
+python3 ~/.hermes/skills/image_api/scripts/image_api.py \
+  --json \
+  --edit \
+  --image "<source-image>" \
+  --mask "<mask-image>" \
+  --validate-mask \
+  "<prompt>" \
+  --size 1024x1024 \
+  --quality low \
+  --format png
+```
 
-自动纠错规则：如果 base 指向 `/responses` 却强制 `--api-mode images`，脚本会拒绝执行，避免把 Images API endpoint 拼成错误路径。不要因鉴权、配额、参数、内容安全、超时或通用上游错误而自动切模式；这些是真实错误，应直接暴露。
+如果 provider 要求某次调用使用特定模型，只在该次调用加 `--model <provider-specific-image-model>`；不要为了修复一次 model/route 错误永久改全局 `IMAGE_MODEL`。
 
-通用配置示例：
+## Configuration
+
+公开示例只能使用占位符：
+
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
+IMAGE_OUT_DIR=/tmp/image_api
 ```
 
-responses 模式注意：`n>1`、部分 provider 的 `background=transparent` 可能不可用；需要多张图时循环多次请求。保存文件时按图片 magic header 判断真实格式，避免 provider 声称 webp 但实际返回 png。
+配置规则：
 
-## 默认参数
+- `IMAGE_API_BASE`：provider base URL，推荐通用 `/v1` base；Responses-only provider 可使用 `/v1/responses` 形态。
+- `IMAGE_API_KEY`：provider API key，只放本地 env/secret store。
+- `IMAGE_MODEL`：provider-specific image-capable model；未配置时必须单次传 `--model <provider-specific-image-model>`。
+- `IMAGE_API_MODE`：`auto`、`images`、`responses`；默认 `auto`。
+- `IMAGE_OUT_DIR`：输出目录，默认 `/tmp/image_api`。
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| quality | low | 用户未指定时用 low |
-| format | png | — |
-| moderation | low | 用户强制要求 |
-| size | 1024x1024 | 证件照用 1024x1536 |
-| timeout | 900s | 脚本内置，通常不需要调 |
+## API Mode and Fallback Boundary
 
-## 自然语言 → 参数映射
+模式：
 
-- `高清` → `--quality high`
-- `透明背景` → `--background transparent`
-- `1:1` → `--size 1024x1024`，`3:4` → `--size 1024x1536`，`4:3` → `--size 1536x1024`
-- `4k` → `--size 3840x1920`（横）或 `--size 1920x3840`（竖）
-- `生成N张` → `--n N`
+- `images`：generation 走 `/images/generations`，edit 走 `/images/edits`。
+- `responses`：走 `/responses` + `image_generation` tool。
+- `auto`：推荐默认；普通 `/v1` base 先尝试 Images API；明确配置 responses 时使用 Responses API。
 
-## 发送方式
+只在这两类情况从 `images` 自动 fallback 到 `responses`：
 
-成功后通过 `MEDIA:/tmp/gptimage/xxx.png` 发送。具体投递行为取决于当前 gateway。
+- `/images/*` 明确不存在，例如 404。
+- provider 返回成功形态但没有可用图片 payload。
 
-**高质量投递（推荐）：** 部分聊天平台会压缩图片消息。对于生成/编辑结果，尽量同时发送：
-1. 图片预览 — 普通 `MEDIA:<path>`，走图片/照片预览，方便内联查看
-2. 原文件附件 — **同一个图片路径按文件形式发送**，不要压成 zip。使用 `send_message` 时在消息里加 `[[as_document]]` 指令：
-   ```text
-   [[as_document]]
-   MEDIA:/tmp/gptimage/xxx.png
-   ```
-   这样 Telegram 会走 `sendDocument`，保留原始文件字节与画质。
+不要在以下情况 fallback：鉴权错误、额度/限流、参数 schema、内容安全、超时、断流、5xx 或通用 upstream failure。base URL 已指向 `/responses` 时，不要强制 `--api-mode images`。
 
-如果图片消息投递失败但文件存在，降级为发送文件附件。
+详细 payload 与 provider 行为按需打开 `references/providers/responses-api-compatibility.md`、`references/providers/responses-only-provider.md` 或 `references/providers/generic-images-api-quirks.md`。
 
-## 参考图工作流（--edit 模式）
+## Output and Delivery
 
-**单参考图：** `--image` 传入一张图，API 直接看到像素。
+验证成功必须满足：
 
-**多参考图（v4.1.0）：** `--ref` 可重复传入多张参考图，底层用 `image[]` multipart 字段发送。
-```bash
---edit --image 主图.png --ref 参考1.png --ref 参考2.png "prompt"
-```
+- JSON 可解析且 `ok` 为 `true`。
+- `paths` 至少包含一个本地文件路径。
+- 每个路径存在、大小大于 0，且文件头是 PNG、JPEG 或 WebP。
+- `used_params.api_mode` 与预期一致；若 auto fallback 生效，只说明“已自动切到兼容模式”，不泄露 provider 私有细节。
 
-当用户说"把这个人加到那个场景里"：
-- 选**人物图**作为 `--image`（主图）
-- 场景图作为 `--ref`（参考图）
-- 效果优于纯文字描述
+交付规则：
 
-当用户只发了一张图并说"用这张图生成"：
-- 默认使用 `--edit` 模式，图片作为参考
-- 不需要先描述图片内容再生成，直接调 API
+- 普通交付：最终回复包含实际 `MEDIA:<path>`，让 gateway 原生发送图片。
+- 用户关心原图质量或平台会压缩：发送预览图 + 同一路径的原始文件附件。
+- `MEDIA:<path>` 与 `[[as_document]]` 是 Hermes/gateway 内部投递指令；不要把真实本地路径放进解释文本或代码块。
+- 若投递失败但文件存在，降级为文件附件，并说明“已改用原文件附件发送”。
 
-当用户发图但没说要做什么：
-- 先问用户想要生成什么样的图
+## Resource Map
 
-## Agent 行为纠正
+核心执行：
 
-当用户发图并说"把她加进去"/"以这张图为参考"时，意图是**用该图作为 `--edit --image` 的参考图**，不是让你先分析图片再描述。不要对用户发的参考图调用 vision_analyze，除非用户明确要求你描述图片内容。
+- `scripts/image_api.py` — 唯一 CLI 执行入口；agent 调用时使用 `--json`。
+- `scripts/validate_skill_docs.py` — 离线结构/隐私/runtime surface 验证。
+- `tests/test_responses_mode.py` — API mode、Responses payload、fallback、CLI surface 回归测试。
 
-## 关键陷阱
+按需参考：
 
-1. **工作目录被删除** — 清理临时目录前切回稳定目录，否则后续 shell 调用可能报 `FileNotFoundError`。已坏时显式设置 `cwd` 再执行。
-2. **API Key 错误返回不一致** — 部分 provider 对过期/错误 key 不返回 401/403，而是返回通用 upstream 错误。先验证 key 与 `/v1/models`，不要盲目重试。
-3. **edit 模式偶发断流** — 部分 provider 的编辑接口会间歇性 `stream disconnected` 或 502。脚本会自动重试；仍失败时向用户说明 provider 限制，不要静默改成文生图。
-4. **API 模式误混用** — `/responses` base 不能拼 `/images/*`；Images API 与 Responses API 需要保持独立。默认用 `auto`，只在 endpoint 缺失或空图片时 fallback。
-5. **分辨率约束** — 宽高通常需要是 16 的倍数，最长边 ≤ 3840px，总像素约 655K~8.3M，宽高比 ≤ 3:1（脚本预校验）。
-6. **mask 校验** — `--validate-mask` 检查 mask 尺寸/alpha；`--fix-mask-alpha` 可在 Pillow 可用时把灰度 mask 转 RGBA alpha mask。
-7. **输出格式不能只信 provider 字段** — 保存文件时按 magic header 判断真实格式，避免请求 webp/jpeg 但实际返回 png。
-8. **聊天网关图片丢失** — 如果用户发了图但当前 turn 没有附件，先查网关缓存/日志；找到本地缓存路径后直接用 `--edit --image "<path>"`，不要把参考图误当成纯文本描述任务。
-9. **用户发图时的意图判断** — 图片生成对话里，图片+文字通常表示参考/编辑素材。只有用户明确要求描述图片时才调用 vision 分析。
+- `references/api/fields.md` — 字段、自然语言到参数映射、交互规则。
+- `references/api/resolution-guide.md` — 分辨率约束和边界案例。
+- `references/providers/provider-quirks.md` — provider 非标准行为通用模板。
+- `references/providers/generic-images-api-quirks.md` — Images API provider 兼容性。
+- `references/providers/responses-api-compatibility.md` — Responses API payload 与测试策略。
+- `references/providers/responses-only-provider.md` — Responses-only provider 配置模板。
+- `references/troubleshooting/image-delivery-debugging.md` — 用户说“图片没收到”时的诊断流程。
+- `references/troubleshooting/gateway-image-debug.md` — 交互式 gateway 图片路由排查。
+- `references/provider-timeout-debugging.md` — HTML/非 JSON/超时响应的脱敏排查。
+- `references/fast-mode-verification.md` — image_api 快速基线验证。
+- `references/fast-term-disambiguation.md` — 区分 Hermes `/fast` 与 image_api 快速基线。
+- `references/hermes-chat-original-delivery.md` — 预览图 + 原始文件附件投递模式。
 
-## 详细参考
+用户/维护者文档：
 
-- `references/api/fields.md` — 字段映射、安全替换表
-- `references/api/resolution-guide.md` — 分辨率约束完整数据
-- `references/providers/provider-quirks.md` — 通用 provider 非标准行为
-- `references/providers/generic-images-api-quirks.md` — Images API provider 常见兼容性问题
-- `references/providers/responses-only-provider.md` — Responses-only provider 兼容性模板
-- `references/providers/responses-api-compatibility.md` — Responses API payload 与测试策略
-- `references/troubleshooting/image-delivery-debugging.md` — 用户说"图片没收到"时的诊断流程
-- `references/troubleshooting/gateway-image-debug.md` — 交互式 gateway 图片路由排查
+- `README.md` / `README.zh-CN.md` — 安装、配置、CLI 参数、项目结构和用户-facing 文档。
+- `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — 可读变更记录。
+- `.env.example` — provider-agnostic 本地配置模板。
+- `LICENSE` — 许可证。
+
+没有 `assets/` 是刻意选择：当前 skill 不需要可复用图片模板、字体或二进制资产；不要为空目录增加噪声。
+
+## Troubleshooting Escalation
+
+- 用户说图片没收到：先检查 JSON `paths`、本地文件、magic header、gateway 投递结果；按 `references/troubleshooting/image-delivery-debugging.md`。
+- provider 返回非 JSON、HTML、超时或 upstream：先脱敏，再按 `references/provider-timeout-debugging.md`。
+- API 模式或 payload 不匹配：按 provider references；不要把 provider-specific 模型写成通用默认。
+- Hermes `/fast` 与图片 fast 混淆：按 `references/fast-term-disambiguation.md`。
+- shell 报 cwd 不存在：terminal 调用显式设置稳定 `workdir`。
+
+## Common Pitfalls
+
+1. **先 vision 再改图。** 用户把图片当素材时直接 edit/reference；vision 只用于识别/描述。
+2. **只看退出码。** 必须解析 JSON 并验证输出文件。
+3. **错误 fallback。** 只有 endpoint 缺失或空图片 payload 才 fallback。
+4. **全局改模型修一次错。** 单次用 `--model`；持久 env 改动要用户同意。
+5. **展示内部投递 marker 或真实路径。** 只把 `MEDIA:<path>` 用作实际投递指令。
+6. **写入 provider-specific 公共默认。** 公开示例只用占位 host、key 和 model。
+7. **忽略 underscore 身份。** `image_api` 是 canonical runtime identity。
+
+## Verification Checklist
+
+- [ ] `SKILL.md` 从 byte 0 开始就是 `---`，frontmatter 有 `name`、`description`、`version`、`author`、`license`、`metadata.hermes.tags`。
+- [ ] `name: image_api`、路径和示例均保留下划线身份。
+- [ ] description 以 “Use when ...” 开头且长度小于 1024。
+- [ ] SKILL/README/public references 不含真实 key、私有 provider、私有模型路由或本地专用配置名。
+- [ ] 示例 key 使用 `YOUR_PROVIDER_API_KEY`，示例模型使用 `your-image-capable-model`。
+- [ ] `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate_skill_docs.py` 通过。
+- [ ] `python3 -B` + `py_compile.compile(..., cfile=/tmp/...)` 验证 Python 文件且不在 skill tree 留 `.pyc`。
+- [ ] `PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -p no:cacheprovider tests/test_responses_mode.py -q` 通过。
+- [ ] 如改动 source repo，还要同步到 `~/.hermes/skills/image_api`，并在新会话重新 `/skill image_api`。

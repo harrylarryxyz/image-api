@@ -70,4 +70,4 @@ Do not call vision analysis just to describe the image unless the user asked for
 
 - Image cache: `~/.hermes/image_cache/`
 - Gateway logs: `~/.hermes/logs/gateway.log`
-- Default generation output: `/tmp/gptimage/`
+- Default generation output: `/tmp/image_api/`

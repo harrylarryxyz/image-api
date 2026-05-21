@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-image_api - 通用封装 v4.1.0
-基于 OpenAI image_api (Generations + Edits)
+image_api - 通用封装 v4.2.1
+基于 OpenAI-compatible / Responses-compatible image APIs
 
 API: /v1/images/generations  生成
 API: /v1/images/edits        编辑
@@ -13,7 +13,8 @@ v4.1.0 合并: 多参考图(--ref)、参数预校验、mask 校验修复、延�
 环境变量:
   IMAGE_API_BASE  - API 端点 (如 https://api.example.com/v1)
   IMAGE_API_KEY   - API 密钥
-  IMAGE_OUT_DIR   - 输出目录 (默认 /tmp/gptimage)
+  IMAGE_MODEL     - 图片模型名（或在单次调用中传 --model）
+  IMAGE_OUT_DIR   - 输出目录 (默认 /tmp/image_api)
 
 使用示例:
   普通模式:
@@ -36,7 +37,7 @@ import time
 import uuid
 import re
 import mimetypes
-from typing import Optional, List, Dict, Any, Tuple, Literal
+from typing import Optional, List, Dict, Any, Tuple, Literal, Iterable
 from dataclasses import dataclass
 
 try:
@@ -49,9 +50,9 @@ except ImportError:
 # 配置 - 延迟加载（避免 --help / 纯参数校验时因缺 env 直接退出）
 # =============================================================================
 
-DEFAULT_OUTDIR = os.environ.get("IMAGE_OUT_DIR", "/tmp/gptimage")
+DEFAULT_OUTDIR = os.environ.get("IMAGE_OUT_DIR", "/tmp/image_api")
 DEFAULT_TIMEOUT = 900
-DEFAULT_MODEL = os.environ.get("IMAGE_MODEL", "gpt-image-2")
+DEFAULT_MODEL = os.environ.get("IMAGE_MODEL", "").strip()
 DEFAULT_API_MODE = os.environ.get("IMAGE_API_MODE", "auto").lower()
 MAX_RETRIES = 2
 RETRY_DELAY = 5  # seconds
@@ -100,8 +101,8 @@ def ensure_runtime_config() -> Tuple[str, str]:
         raise RuntimeError(
             "image_api 尚未配置：缺少 " + ", ".join(missing) + "。"
             "请在 ~/.hermes/.env 中配置 IMAGE_API_BASE 和 IMAGE_API_KEY，"
-            "运行时用 `source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE` 注入环境变量。"
-            "例如 IMAGE_API_BASE=http://api.example.com/v1。"
+            "运行时用 `source ~/.hermes/.env && export IMAGE_API_KEY IMAGE_API_BASE IMAGE_MODEL IMAGE_API_MODE` 注入环境变量。"
+            "例如 IMAGE_API_BASE=https://api.example.com/v1。"
         )
 
     API_BASE = base_url
@@ -110,6 +111,25 @@ def ensure_runtime_config() -> Tuple[str, str]:
         "Authorization": f"Bearer {API_KEY}",
     })
     return API_BASE, API_KEY
+
+
+def _sanitize_runtime_message(message: str, extra_sensitive_values: Optional[Iterable[str]] = None) -> str:
+    """Redact local provider secrets, base URLs, and model routes from user-visible errors."""
+    sanitized = str(message)
+    sensitive_values = [
+        API_BASE,
+        os.environ.get("IMAGE_API_BASE", ""),
+        os.environ.get("IMAGE_API_KEY", ""),
+        os.environ.get("IMAGE_MODEL", ""),
+        DEFAULT_MODEL,
+    ]
+    if extra_sensitive_values:
+        sensitive_values.extend(str(value) for value in extra_sensitive_values)
+    for value in sensitive_values:
+        if value:
+            sanitized = sanitized.replace(value, "<redacted>")
+    sanitized = re.sub(r"Bearer\s+[^\s,;]+", "Bearer <redacted>", sanitized, flags=re.IGNORECASE)
+    return sanitized
 
 
 def resolve_api_mode(mode: str = "auto") -> str:
@@ -187,6 +207,14 @@ def _responses_tool_payload(
 
 
 def _responses_generate_payload(prompt: str, config: "ImageGenConfig") -> Dict[str, Any]:
+    _validate_image_options(
+        model=config.model,
+        size=config.size,
+        quality=config.quality,
+        fmt=config.format,
+        output_compression=config.output_compression,
+        background=config.background,
+    )
     return {
         "model": config.model,
         "input": prompt,
@@ -203,6 +231,14 @@ def _responses_generate_payload(prompt: str, config: "ImageGenConfig") -> Dict[s
 
 
 def _responses_edit_payload(prompt: str, image: str, mask: Optional[str], config: "ImageEditConfig") -> Dict[str, Any]:
+    _validate_image_options(
+        model=config.model,
+        size=config.size,
+        quality=config.quality,
+        fmt=config.format,
+        output_compression=config.output_compression,
+        background=config.background,
+    )
     content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
     for item in [image, *(config.refs or [])]:
         content.append({"type": "input_image", "image_url": _file_to_data_url(item)})
@@ -236,16 +272,13 @@ def _save_responses_images(resp: Dict[str, Any], prompt: str, outdir: str, prefi
 # requests Session（复用连接）
 _session = _requests.Session()
 _session.headers.update({
-    "User-Agent": "Image-API/4.1",
+    "User-Agent": "image_api/4.2.1",
 })
 
 
 # =============================================================================
 # 参数预校验
 # =============================================================================
-
-def _is_gpt_image_2(model: str) -> bool:
-    return model.strip().lower() == "gpt-image-2"
 
 
 def _validate_image_options(
@@ -257,16 +290,15 @@ def _validate_image_options(
     output_compression: Optional[int] = None,
     background: Optional[str] = None,
 ) -> None:
-    """Validate options against current GPT image_api constraints before sending."""
+    """Validate provider-agnostic image options before sending."""
+    if not str(model or "").strip():
+        raise ValueError("缺少模型：请设置 IMAGE_MODEL 或传入 --model")
     if quality and quality not in VALID_QUALITIES:
         raise ValueError(f"quality 必须是 {sorted(VALID_QUALITIES)} 之一")
     if background and background not in VALID_BACKGROUNDS:
         raise ValueError(f"background 必须是 {sorted(VALID_BACKGROUNDS)} 之一")
     if fmt and fmt not in VALID_FORMATS:
         raise ValueError(f"format 必须是 {sorted(VALID_FORMATS)} 之一")
-
-    if _is_gpt_image_2(model) and background == "transparent":
-        raise ValueError("gpt-image-2 目前不支持 background=transparent；请改用 background=auto/opaque，或换支持透明背景的模型。")
 
     if output_compression is not None:
         if not 0 <= output_compression <= 100:
@@ -539,9 +571,9 @@ def _request_json(
     except _requests.exceptions.Timeout:
         return {"_error": f"请求超时 ({timeout}s)", "_request_id": request_id}
     except _requests.exceptions.ConnectionError as e:
-        return {"_error": f"连接失败: {e}", "_request_id": request_id}
+        return {"_error": f"连接失败: {_sanitize_runtime_message(str(e))}", "_request_id": request_id}
     except Exception as e:
-        return {"_error": str(e), "_request_id": request_id}
+        return {"_error": _sanitize_runtime_message(str(e)), "_request_id": request_id}
 
     # 检查 HTML 错误
     html_err = _is_html_error(resp)
@@ -659,9 +691,9 @@ def _request_multipart(
     except _requests.exceptions.Timeout:
         return {"_error": f"请求超时 ({timeout}s)", "_request_id": request_id}
     except _requests.exceptions.ConnectionError as e:
-        return {"_error": f"连接失败: {e}", "_request_id": request_id}
+        return {"_error": f"连接失败: {_sanitize_runtime_message(str(e))}", "_request_id": request_id}
     except Exception as e:
-        return {"_error": str(e), "_request_id": request_id}
+        return {"_error": _sanitize_runtime_message(str(e)), "_request_id": request_id}
     finally:
         # 关闭文件句柄
         for _, v in files:
@@ -698,13 +730,13 @@ def _request_multipart(
     return data
 
 
-def _parse_error(resp: Dict[str, Any]) -> Optional[str]:
+def _parse_error(resp: Dict[str, Any], extra_sensitive_values: Optional[Iterable[str]] = None) -> Optional[str]:
     if "_error" in resp:
-        return resp["_error"]
+        return _sanitize_runtime_message(resp["_error"], extra_sensitive_values)
     err = resp.get("error")
     if err is not None:
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-        return msg[:200]
+        return _sanitize_runtime_message(msg[:200], extra_sensitive_values)
     return None
 
 
@@ -868,9 +900,9 @@ def generate(
         elapsed = time.time() - start
 
         if not silent:
-            print(f"    端点: {ensure_runtime_config()[0]}{endpoint}")
+            print(f"    端点模式: {api_mode} {endpoint}")
 
-        err = _parse_error(resp)
+        err = _parse_error(resp, [config.model])
         if err:
             if requested_auto and not fallback_tried and api_mode == "images" and _looks_like_missing_endpoint(err):
                 if not silent:
@@ -933,6 +965,15 @@ def edit(
 
     os.makedirs(config.outdir, exist_ok=True)
 
+    _validate_image_options(
+        model=config.model,
+        size=config.size,
+        quality=config.quality,
+        fmt=config.format,
+        output_compression=config.output_compression,
+        background=config.background,
+    )
+
     if not silent:
         print(f"[编辑] {prompt[:50]}...")
         print(f"    原图: {image}")
@@ -984,9 +1025,9 @@ def edit(
         elapsed = time.time() - start
 
         if not silent:
-            print(f"    端点: {ensure_runtime_config()[0]}{endpoint}")
+            print(f"    端点模式: {api_mode} {endpoint}")
 
-        err = _parse_error(resp)
+        err = _parse_error(resp, [config.model])
         if err:
             if requested_auto and not fallback_tried and api_mode == "images" and _looks_like_missing_endpoint(err):
                 if not silent:
@@ -1074,8 +1115,8 @@ def main():
 环境变量:
   IMAGE_API_BASE  API 端点 (必须)
   IMAGE_API_KEY   API 密钥 (必须)
-  IMAGE_OUT_DIR   输出目录 (默认 /tmp/gptimage)
-  IMAGE_MODEL     默认模型 (默认 gpt-image-2)
+  IMAGE_OUT_DIR   输出目录 (默认 /tmp/image_api)
+  IMAGE_MODEL     默认模型（未配置时必须传 --model）
 
 示例:
   普通模式:
@@ -1100,10 +1141,10 @@ def main():
     parser.add_argument("--image", help="原图路径/URL/data URL（编辑模式必填）")
     parser.add_argument("--ref", dest="refs", action="append", default=[], help="参考图，可重复传入；--edit 下作为额外 image[]")
     parser.add_argument("--mask", help="mask 路径/URL/data URL（可选）")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"模型名称 (默认 {DEFAULT_MODEL})")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="模型名称（默认读取 IMAGE_MODEL；未配置时必须显式传入）")
     parser.add_argument("--size", default="1024x1024", help="尺寸，默认 1024x1024；也支持 auto 与符合约束的任意 16 倍数尺寸")
     parser.add_argument("--quality", default="low", choices=["low", "medium", "high", "auto"], help="质量 (low/medium/high/auto)")
-    parser.add_argument("--n", type=int, default=1, help="生成数量 1-10（实际上游始终只返回 1）")
+    parser.add_argument("--n", type=int, default=1, help="生成数量 1-10（部分 provider/API 模式可能只返回 1）")
     parser.add_argument("--format", dest="fmt", choices=["png", "jpeg", "webp"], help="输出格式")
     parser.add_argument("--compression", type=int, help="压缩率 0-100（仅 jpeg/webp）")
     parser.add_argument("--background", choices=["opaque", "auto", "transparent"], help="背景")
@@ -1117,6 +1158,15 @@ def main():
     parser.add_argument("--json", action="store_true", help="JSON 结构化输出模式（用于程序化调用）")
 
     args = parser.parse_args()
+
+    if not (args.model or "").strip():
+        err = "缺少模型：请设置 IMAGE_MODEL 或传入 --model"
+        if args.json:
+            print(json.dumps({"ok": False, "error": err}, ensure_ascii=False))
+        else:
+            print(f"[❌] {err}")
+        sys.exit(1)
+    args.model = args.model.strip()
 
     # 参数验证
     if args.edit and not args.image:
@@ -1185,7 +1235,6 @@ def main():
                 "paths": [img.saved_path for img in images if img.saved_path],
                 "used_params": {
                     "mode": "edit" if args.edit else "generate",
-                    "model": args.model,
                     "size": args.size,
                     "quality": args.quality,
                     "output_format": args.fmt or "png",
@@ -1193,7 +1242,6 @@ def main():
                     "moderation": args.moderation or "low",
                     "api_mode": ("responses" if getattr(images[0], "provider_mode", None) == "responses" else resolve_api_mode(args.api_mode)),
                 },
-                "endpoint": ensure_runtime_config()[0],
             }
             print(json.dumps(result, ensure_ascii=False))
         else:
@@ -1202,9 +1250,9 @@ def main():
 
     except Exception as e:
         if args.json:
-            print(json.dumps({"ok": False, "error": str(e), "endpoint": API_BASE or ""}, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": _sanitize_runtime_message(str(e), [args.model])}, ensure_ascii=False))
         else:
-            print(f"[❌] 失败: {e}")
+            print(f"[❌] 失败: {_sanitize_runtime_message(str(e), [args.model])}")
         sys.exit(1)
 
 

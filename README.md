@@ -104,8 +104,8 @@ Recommended minimal configuration:
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
-IMAGE_MODEL=gpt-image-2
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
+IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
 
@@ -113,7 +113,7 @@ For a provider that exposes images only through a Responses-style endpoint, use 
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
@@ -122,20 +122,20 @@ If a provider requires the endpoint path to be explicit, this also works:
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1/responses
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
 
-Do not commit real keys. Examples should use placeholders such as `sk-your-provider-key`.
+Do not commit real keys. Examples should use placeholders such as `YOUR_PROVIDER_API_KEY`.
 
 ## Environment variables
 
 - `IMAGE_API_BASE`: Provider base URL. Required. Prefer a generic `/v1` base when available.
 - `IMAGE_API_KEY`: Provider API key. Required.
-- `IMAGE_MODEL`: Default model. Optional; defaults to `gpt-image-2` when unset.
+- `IMAGE_MODEL`: Provider-specific model name. Required through either this env var or a per-call `--model <provider-specific-image-model>` argument; the script has no provider-specific built-in model default.
 - `IMAGE_API_MODE`: `auto`, `images`, or `responses`. Optional; defaults to `auto`.
-- `IMAGE_OUT_DIR`: Output directory. Optional; defaults to `/tmp/gptimage`.
+- `IMAGE_OUT_DIR`: Output directory. Optional; defaults to `/tmp/image_api`.
 
 ## Quick start
 
@@ -158,18 +158,16 @@ The output is JSON when `--json` is used:
 ```json
 {
   "ok": true,
-  "paths": ["/tmp/gptimage/0520_120000_A_clean_vector_style_blue_check_0.png"],
+  "paths": ["/tmp/image_api/0520_120000_A_clean_vector_style_blue_check_0.png"],
   "used_params": {
     "mode": "generate",
-    "model": "gpt-image-2",
     "size": "1024x1024",
     "quality": "low",
     "output_format": "png",
     "n": 1,
     "moderation": "low",
     "api_mode": "images"
-  },
-  "endpoint": "https://api.example.com/v1"
+  }
 }
 ```
 
@@ -285,7 +283,7 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
 
 ## Output and file handling
 
-Generated files are written to `IMAGE_OUT_DIR`, `--outdir`, or `/tmp/gptimage`.
+Generated files are written to `IMAGE_OUT_DIR`, `--outdir`, or `/tmp/image_api`.
 
 The client saves images using the actual byte format, not only the provider-declared `output_format`. This matters because some providers may claim `webp` or `jpeg` while returning PNG bytes.
 
@@ -300,7 +298,7 @@ For Telegram and other Hermes gateways that honor document delivery directives, 
 
 ```text
 [[as_document]]
-MEDIA:/tmp/gptimage/xxx.png
+MEDIA:/tmp/image_api/xxx.png
 ```
 
 This routes image-extension files through file/document delivery, such as Telegram `sendDocument`, instead of photo delivery, such as Telegram `sendPhoto`.
@@ -357,11 +355,17 @@ See `references/api/resolution-guide.md` for more detail.
 
 ## Testing
 
-Run the regression tests:
+Run the documentation validator and regression tests without leaving cache artifacts:
 
 ```bash
-python3 -m pytest tests/test_responses_mode.py -q
-python3 -m py_compile scripts/image_api.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate_skill_docs.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -p no:cacheprovider tests/test_responses_mode.py -q
+python3 -B - <<'PY'
+import py_compile
+for path in ["scripts/image_api.py", "scripts/validate_skill_docs.py"]:
+    py_compile.compile(path, cfile=f"/tmp/{path.replace('/', '_')}.pyc", doraise=True)
+PY
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate_skill_docs.py
 ```
 
 Optional live smoke test, assuming `~/.hermes/.env` contains valid provider credentials:
@@ -376,7 +380,7 @@ python3 scripts/image_api.py \
   "A tiny black plus icon on a white background" \
   --size 1024x1024 \
   --format png \
-  --outdir /tmp/gptimage_smoke
+  --outdir /tmp/image_api_smoke
 ```
 
 ## Project structure
@@ -389,7 +393,8 @@ image_api/
 ├── LICENSE
 ├── .env.example
 ├── scripts/
-│   └── image_api.py
+│   ├── image_api.py
+│   └── validate_skill_docs.py
 ├── tests/
 │   └── test_responses_mode.py
 └── references/
@@ -401,9 +406,13 @@ image_api/
     │   ├── generic-images-api-quirks.md
     │   ├── responses-api-compatibility.md
     │   └── responses-only-provider.md
-    └── troubleshooting/
-        ├── gateway-image-debug.md
-        └── image-delivery-debugging.md
+    ├── troubleshooting/
+    │   ├── gateway-image-debug.md
+    │   └── image-delivery-debugging.md
+    ├── fast-mode-verification.md
+    ├── fast-term-disambiguation.md
+    ├── hermes-chat-original-delivery.md
+    └── provider-timeout-debugging.md
 ```
 
 ## Security notes
@@ -416,7 +425,3 @@ image_api/
 ## License
 
 MIT
-
-## Friend Link
-
-[LinuxDo](https://www.linux.do)

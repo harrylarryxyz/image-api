@@ -104,8 +104,8 @@ hermes config env-path
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
-IMAGE_MODEL=gpt-image-2
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
+IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
 
@@ -113,7 +113,7 @@ IMAGE_API_MODE=auto
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
@@ -122,20 +122,20 @@ IMAGE_API_MODE=auto
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1/responses
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
 
-不要提交真实 key。文档和 issue 示例应使用 `sk-your-provider-key` 这类占位符。
+不要提交真实 key。文档和 issue 示例应使用 `YOUR_PROVIDER_API_KEY` 这类占位符。
 
 ## 环境变量
 
 - `IMAGE_API_BASE`：Provider base URL。必填。可用时优先用通用 `/v1` base。
 - `IMAGE_API_KEY`：Provider API key。必填。
-- `IMAGE_MODEL`：默认模型。可选；未设置时默认 `gpt-image-2`。
+- `IMAGE_MODEL`：provider-specific 模型名。必须通过此环境变量或单次调用的 `--model <provider-specific-image-model>` 提供；脚本不内置任何 provider-specific 默认模型。
 - `IMAGE_API_MODE`：`auto`、`images` 或 `responses`。可选；默认 `auto`。
-- `IMAGE_OUT_DIR`：输出目录。可选；默认 `/tmp/gptimage`。
+- `IMAGE_OUT_DIR`：输出目录。可选；默认 `/tmp/image_api`。
 
 ## 快速开始
 
@@ -158,18 +158,16 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
 ```json
 {
   "ok": true,
-  "paths": ["/tmp/gptimage/0520_120000_A_clean_vector_style_blue_check_0.png"],
+  "paths": ["/tmp/image_api/0520_120000_A_clean_vector_style_blue_check_0.png"],
   "used_params": {
     "mode": "generate",
-    "model": "gpt-image-2",
     "size": "1024x1024",
     "quality": "low",
     "output_format": "png",
     "n": 1,
     "moderation": "low",
     "api_mode": "images"
-  },
-  "endpoint": "https://api.example.com/v1"
+  }
 }
 ```
 
@@ -285,7 +283,7 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
 
 ## 输出与文件处理
 
-生成文件会写入 `IMAGE_OUT_DIR`、`--outdir` 或 `/tmp/gptimage`。
+生成文件会写入 `IMAGE_OUT_DIR`、`--outdir` 或 `/tmp/image_api`。
 
 客户端会根据实际字节格式保存图片，而不是只信 provider 声称的 `output_format`。这很重要，因为一些 provider 可能声称返回 `webp` 或 `jpeg`，但实际返回 PNG 字节。
 
@@ -300,7 +298,7 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
 
 ```text
 [[as_document]]
-MEDIA:/tmp/gptimage/xxx.png
+MEDIA:/tmp/image_api/xxx.png
 ```
 
 这会让图片扩展名文件走文件/文档投递，例如 Telegram `sendDocument`，而不是照片投递，例如 Telegram `sendPhoto`。
@@ -357,11 +355,17 @@ Images API 到 Responses API 的 auto fallback 是刻意收窄的：
 
 ## 测试
 
-运行回归测试：
+运行文档验证器和回归测试，并避免留下缓存文件：
 
 ```bash
-python3 -m pytest tests/test_responses_mode.py -q
-python3 -m py_compile scripts/image_api.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate_skill_docs.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -p no:cacheprovider tests/test_responses_mode.py -q
+python3 -B - <<'PY'
+import py_compile
+for path in ["scripts/image_api.py", "scripts/validate_skill_docs.py"]:
+    py_compile.compile(path, cfile=f"/tmp/{path.replace('/', '_')}.pyc", doraise=True)
+PY
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/validate_skill_docs.py
 ```
 
 可选 live smoke test，前提是 `~/.hermes/.env` 中已有有效 provider 凭据：
@@ -376,7 +380,7 @@ python3 scripts/image_api.py \
   "A tiny black plus icon on a white background" \
   --size 1024x1024 \
   --format png \
-  --outdir /tmp/gptimage_smoke
+  --outdir /tmp/image_api_smoke
 ```
 
 ## 项目结构
@@ -391,7 +395,8 @@ image_api/
 ├── LICENSE
 ├── .env.example
 ├── scripts/
-│   └── image_api.py
+│   ├── image_api.py
+│   └── validate_skill_docs.py
 ├── tests/
 │   └── test_responses_mode.py
 └── references/
@@ -403,9 +408,13 @@ image_api/
     │   ├── generic-images-api-quirks.md
     │   ├── responses-api-compatibility.md
     │   └── responses-only-provider.md
-    └── troubleshooting/
-        ├── gateway-image-debug.md
-        └── image-delivery-debugging.md
+    ├── troubleshooting/
+    │   ├── gateway-image-debug.md
+    │   └── image-delivery-debugging.md
+    ├── fast-mode-verification.md
+    ├── fast-term-disambiguation.md
+    ├── hermes-chat-original-delivery.md
+    └── provider-timeout-debugging.md
 ```
 
 ## 安全说明
@@ -418,7 +427,3 @@ image_api/
 ## License
 
 MIT
-
-## Friend Link
-
-[LinuxDo](https://www.linux.do)

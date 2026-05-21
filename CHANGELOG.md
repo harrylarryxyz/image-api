@@ -13,6 +13,7 @@ This project follows a human-readable changelog style inspired by [Keep a Change
 - Professionalized the public README as a provider-agnostic project entry point.
 - Expanded documentation for API modes, configuration, CLI parameters, output handling, provider compatibility, security, and testing.
 - Added generic provider examples using placeholder hosts and keys instead of real provider credentials.
+- `scripts/validate_skill_docs.py` now also checks runtime CLI surfaces, generated cache artifacts, provider-specific hardcoded model defaults, secret-like key placeholders, and the grouped Skill Creator resource structure.
 
 ### Changed
 
@@ -20,6 +21,17 @@ This project follows a human-readable changelog style inspired by [Keep a Change
 - Moved provider-specific guidance out of the main README narrative and into `references/` notes.
 - Clarified that `IMAGE_API_MODE=auto` is the recommended default for non-expert users.
 - Clarified the safe fallback policy: fallback from Images API to Responses API only for missing image endpoints or empty image payloads, not for authentication, quota, validation, content policy, timeout, or generic upstream errors.
+- Standardized `SKILL.md` as the authoritative runtime behavior contract with full Hermes skill frontmatter, runtime authority order, verification gates, and provider-agnostic delivery/troubleshooting rules.
+- Removed provider-specific built-in model fallback from the CLI; callers must configure `IMAGE_MODEL` or pass `--model` per call.
+- Removed provider base URL and model route exposure from JSON/help output surfaces.
+- Reorganized `SKILL.md` around Skill Creator progressive disclosure: compact runtime contract, workflow, quick recipes, grouped resource map, troubleshooting escalation, pitfalls, and verification.
+- Redacted `IMAGE_MODEL` and explicit one-off model values from user-visible runtime errors.
+- Added edit-path model validation before Responses payload construction so programmatic calls cannot send an empty model.
+- Renamed the default output directory to `/tmp/image_api` and added a validator guard for stale branded path references.
+
+### Security
+
+- Removed private/local provider naming from the runtime skill surface and replaced public examples with explicit placeholders such as `YOUR_PROVIDER_API_KEY` and `your-image-capable-model`.
 
 ## [4.2.0] - 2026-05-20
 

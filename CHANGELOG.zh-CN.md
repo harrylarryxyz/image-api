@@ -14,6 +14,7 @@
 - 扩展了 API 模式、配置、CLI 参数、输出处理、provider 兼容性、安全和测试说明。
 - 文档示例统一使用占位 host 和占位 key，避免出现真实 provider 凭据或私人测试配置。
 - 新增中文 README 与中文 CHANGELOG，并在中英文文档顶部加入语言互链。
+- `scripts/validate_skill_docs.py` 现在也检查 runtime CLI 表面、生成缓存文件、provider-specific 硬编码模型默认值、类似 secret 的 key 占位符，以及按 Skill Creator 整理后的分组资源结构。
 
 ### Changed
 
@@ -22,6 +23,17 @@
 - 明确 `IMAGE_API_MODE=auto` 是非专家用户的推荐默认值。
 - 明确安全 fallback 策略：只有 Images API 端点缺失或图片 payload 为空时，才从 Images API fallback 到 Responses API；不会因鉴权、额度、参数校验、内容安全、超时或通用上游错误而 fallback。
 - 清理公开 reference 与 `SKILL.md` 中的个人 provider、模型路线和私有环境痕迹，保留泛化后的兼容性经验。
+- 将 `SKILL.md` 标准化为权威 runtime 行为契约，包含完整 Hermes skill frontmatter、runtime authority、验证门禁和 provider-agnostic 投递/排障规则。
+- CLI 不再内置 provider-specific 默认模型；调用者必须配置 `IMAGE_MODEL` 或单次传入 `--model`。
+- JSON/help 输出表面不再暴露 provider base URL 或模型路由。
+- 按 Skill Creator progressive disclosure 原则重组 `SKILL.md`：压缩 runtime contract、workflow、quick recipes、分组 Resource Map、troubleshooting escalation、pitfalls 和 verification。
+- 用户可见 runtime 错误会脱敏 `IMAGE_MODEL` 和单次 `--model` 传入的模型值。
+- edit 路径在构造 Responses payload 前验证模型，避免程序化调用发送空模型。
+- 默认输出目录改为 `/tmp/image_api`，并在 validator 中加入旧品牌化路径防回归检查。
+
+### Security
+
+- 从 runtime skill 表面移除私有/本地 provider 命名，公开示例统一改为 `YOUR_PROVIDER_API_KEY`、`your-image-capable-model` 等明确占位符。
 
 ## [4.2.0] - 2026-05-20
 

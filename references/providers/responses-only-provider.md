@@ -25,7 +25,7 @@ Recommended public configuration pattern:
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
@@ -34,7 +34,7 @@ If a provider requires users to include the endpoint path explicitly, this is al
 
 ```bash
 IMAGE_API_BASE=https://api.example.com/v1/responses
-IMAGE_API_KEY=sk-your-provider-key
+IMAGE_API_KEY=YOUR_PROVIDER_API_KEY
 IMAGE_MODEL=your-image-capable-model
 IMAGE_API_MODE=auto
 ```
