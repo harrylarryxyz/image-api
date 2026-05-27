@@ -28,3 +28,7 @@ but got unsupported MIME type 'application/octet-stream'
 2. 用 provider 支持的模型/账户探针端点验证 key 与模型可见性。
 3. 若 key 与模型可见但图片 endpoint 不通，按 endpoint/API-mode 问题排查。
 4. 不要在公共 issue、README、SKILL.md 或聊天回复中粘贴真实 key、base URL 或模型路由。
+
+## Model-specific notes
+
+- [OpenAI image model notes](openai-image-models.md) documents GPT Image 2 constraints, transparent-background handling, timeout hints, and smoke-test coverage.

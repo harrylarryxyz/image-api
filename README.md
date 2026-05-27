@@ -18,7 +18,7 @@ It is designed for provider-agnostic use: configure a base URL, API key, and mod
 - Response parsing for both `b64_json` and URL image payloads.
 - Magic-header output format detection, so saved file extensions reflect actual image bytes when providers mislabel formats.
 - Clear diagnostics for HTML/proxy responses, JSON errors, unsupported options, endpoint mismatches, and retryable upstream failures.
-- JSON output mode for Hermes, cron jobs, scripts, and other automation.
+- JSON output mode for Hermes, cron jobs, scripts, and other automation, including route metadata for the actual model, API mode, endpoint, and auto-fallback decision.
 
 ## What this project is
 
@@ -167,11 +167,36 @@ The output is JSON when `--json` is used:
     "n": 1,
     "moderation": "low",
     "api_mode": "images"
+  },
+  "route": {
+    "requested_model": "your-image-capable-model",
+    "resolved_model": "your-image-capable-model",
+    "api_mode": "images",
+    "endpoint": "/images/generations",
+    "fallback_attempted": false,
+    "fallback_reason": null
   }
 }
 ```
 
 `api_mode` may be `responses` when auto fallback selects the Responses API.
+
+### Route metadata and fallback trace
+
+When `--json` is enabled, successful responses include a `route` object. This is designed for debugging provider-compatible image APIs without guessing what happened internally:
+
+```json
+{
+  "requested_model": "your-image-capable-model",
+  "resolved_model": "your-image-capable-model",
+  "api_mode": "responses",
+  "endpoint": "/responses",
+  "fallback_attempted": true,
+  "fallback_reason": "images_endpoint_missing"
+}
+```
+
+`fallback_attempted` only records the narrow Images-to-Responses auto fallback. Authentication, quota, policy, timeout, validation, and generic upstream failures stay visible and do not switch API families.
 
 ## Common commands
 
@@ -319,6 +344,7 @@ A provider may differ in these areas:
 - whether edit mode accepts multipart `image[]`, Responses `input_image`, or masks;
 - whether `n > 1` is supported;
 - whether `transparent` backgrounds are supported;
+- whether explicit model requests have model-specific constraints that should fail clearly instead of silently switching models;
 - whether `quality`, `output_format`, and `compression` are honored exactly;
 - whether returned image bytes match the requested format.
 

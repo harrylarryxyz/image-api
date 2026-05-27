@@ -239,3 +239,76 @@ def test_cli_json_error_without_model_has_no_endpoint(monkeypatch):
     assert data["ok"] is False
     assert "IMAGE_MODEL" in data["error"]
     assert "endpoint" not in data
+
+
+
+def test_gpt_image_2_transparent_background_is_blocked():
+    with pytest.raises(ValueError, match="transparent background"):
+        image_api._validate_image_options(
+            model="gpt-image-2",
+            size="1024x1024",
+            fmt="png",
+            background="transparent",
+        )
+
+
+def test_gpt_image_2_provider_prefixed_transparent_background_is_blocked():
+    with pytest.raises(ValueError, match="gpt-image-2"):
+        image_api._validate_image_options(
+            model="openai/gpt-image-2",
+            size="1024x1024",
+            fmt="webp",
+            background="transparent",
+        )
+
+
+def test_gpt_image_2_reference_limit_guard():
+    with pytest.raises(ValueError, match="at most 4 reference images"):
+        image_api._validate_model_capability_options(
+            model="gpt-image-2",
+            refs_count=5,
+        )
+
+
+def test_generate_attaches_route_metadata_images_mode(monkeypatch, tmp_path):
+    reset_config(monkeypatch)
+
+    def fake_request_json(endpoint, payload, timeout):
+        return {"data": [{"b64_json": png_b64()}]}
+
+    monkeypatch.setattr(image_api, "_request_json", fake_request_json)
+    cfg = image_api.ImageGenConfig(model="images-test-model", outdir=str(tmp_path), api_mode="images")
+
+    images = image_api.generate("draw a cat", cfg, silent=True)
+
+    route = images[0].route_metadata
+    assert route == {
+        "requested_model": "images-test-model",
+        "resolved_model": "images-test-model",
+        "api_mode": "images",
+        "endpoint": "/images/generations",
+        "fallback_attempted": False,
+        "fallback_reason": None,
+    }
+
+
+def test_auto_generate_route_metadata_records_fallback(monkeypatch, tmp_path):
+    reset_config(monkeypatch)
+
+    def fake_request_json(endpoint, payload, timeout):
+        if endpoint == "/images/generations":
+            return {"_error": "HTTP 404: not found"}
+        return {"output": [{"type": "image_generation_call", "result": png_b64(), "action": "generate"}]}
+
+    monkeypatch.setattr(image_api, "_request_json", fake_request_json)
+    cfg = image_api.ImageGenConfig(model="responses-test-model", outdir=str(tmp_path), api_mode="auto")
+
+    images = image_api.generate("draw fallback", cfg, silent=True)
+
+    route = images[0].route_metadata
+    assert route["requested_model"] == "responses-test-model"
+    assert route["resolved_model"] == "responses-test-model"
+    assert route["api_mode"] == "responses"
+    assert route["endpoint"] == "/responses"
+    assert route["fallback_attempted"] is True
+    assert route["fallback_reason"] == "images_endpoint_missing"

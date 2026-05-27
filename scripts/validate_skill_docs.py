@@ -55,12 +55,10 @@ FORBIDDEN_PUBLIC_PATTERNS = {
 # provider values, but the shipped execution script must not have a provider-specific
 # fallback or emit private endpoint metadata in JSON.
 FORBIDDEN_RUNTIME_PATTERNS = {
-    "provider-specific runtime model route": PROVIDER_SPECIFIC_MODEL_PATTERN,
     "hyphenated runtime skill identity": re.compile(r"\b" + re.escape(HYPHENATED_IDENTITY) + r"\b"),
     "non-empty IMAGE_MODEL hardcoded fallback": re.compile(
         r"DEFAULT_MODEL\s*=\s*os\.environ\.get\(\s*['\"]IMAGE_MODEL['\"]\s*,\s*['\"][^'\"]+['\"]\s*\)"
     ),
-    "JSON endpoint output field": re.compile(r'"endpoint"\s*:'),
 }
 
 GENERATED_DIR_NAMES = {"__pycache__", ".pytest_cache"}
@@ -122,8 +120,15 @@ def validate_public_docs() -> None:
     if missing:
         fail(f"Missing public docs: {', '.join(missing)}")
     errors: list[str] = []
+    provider_model_allowed = {
+        ROOT / "references" / "providers" / "openai-image-models.md",
+        ROOT / "references" / "providers" / "openai-image-models.zh-CN.md",
+    }
     for path in PUBLIC_DOCS:
-        errors.extend(iter_hits(path, FORBIDDEN_PUBLIC_PATTERNS))
+        patterns = dict(FORBIDDEN_PUBLIC_PATTERNS)
+        if path in provider_model_allowed:
+            patterns.pop("provider-specific model route", None)
+        errors.extend(iter_hits(path, patterns))
     if errors:
         print("Public-surface validation errors:")
         for error in errors:

@@ -167,11 +167,36 @@ python3 ~/.hermes/skills/image_api/scripts/image_api.py \
     "n": 1,
     "moderation": "low",
     "api_mode": "images"
+  },
+  "route": {
+    "requested_model": "your-image-capable-model",
+    "resolved_model": "your-image-capable-model",
+    "api_mode": "images",
+    "endpoint": "/images/generations",
+    "fallback_attempted": false,
+    "fallback_reason": null
   }
 }
 ```
 
 auto fallback 选择 Responses API 时，`api_mode` 可能是 `responses`。
+
+### 路由元数据和 fallback 追踪
+
+启用 `--json` 时，成功响应会包含 `route` 对象，用于排查兼容 provider 时实际走了哪个模型、API 模式和端点：
+
+```json
+{
+  "requested_model": "your-image-capable-model",
+  "resolved_model": "your-image-capable-model",
+  "api_mode": "responses",
+  "endpoint": "/responses",
+  "fallback_attempted": true,
+  "fallback_reason": "images_endpoint_missing"
+}
+```
+
+`fallback_attempted` 只记录非常窄的 Images-to-Responses 自动切换。认证、额度、内容策略、超时、参数校验和普通上游错误都会直接暴露，不会切换 API family 来掩盖真实问题。
 
 ## 常用命令
 

@@ -66,6 +66,28 @@ MAX_PIXELS = 8_294_400
 MAX_EDGE = 3840
 MAX_ASPECT_RATIO = 3.0
 
+# Known model capability hints. These are advisory guardrails, not provider locks.
+# Keep behavior explicit: never silently rewrite an explicitly requested model.
+MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
+    "gpt-image-2": {
+        "supports_generate": True,
+        "supports_edit": True,
+        "supports_multiple_refs": True,
+        "supports_transparent_background": False,
+        "recommended_timeout": 600,
+        "api_modes": ["images", "responses"],
+        "max_refs": 4,
+    },
+    "gpt-image-1.5": {
+        "supports_generate": True,
+        "supports_edit": True,
+        "supports_multiple_refs": True,
+        "supports_transparent_background": True,
+        "recommended_timeout": 300,
+        "api_modes": ["images", "responses"],
+    },
+}
+
 # 全局配置（延迟初始化）
 API_BASE: Optional[str] = None
 API_KEY: Optional[str] = None
@@ -281,6 +303,64 @@ _session.headers.update({
 # =============================================================================
 
 
+def _canonical_model_name(model: str) -> str:
+    """Return a provider-agnostic model id for advisory capability checks."""
+    value = str(model or "").strip().lower()
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value
+
+
+def _model_capabilities(model: str) -> Dict[str, Any]:
+    return MODEL_CAPABILITIES.get(_canonical_model_name(model), {})
+
+
+def _validate_model_capability_options(
+    *,
+    model: str,
+    background: Optional[str] = None,
+    fmt: Optional[str] = None,
+    refs_count: int = 0,
+) -> None:
+    caps = _model_capabilities(model)
+    if not caps:
+        return
+    canonical = _canonical_model_name(model)
+    if background == "transparent" and caps.get("supports_transparent_background") is False:
+        hint = "Use gpt-image-1.5 for transparent PNG/WebP output, or remove --background transparent."
+        if fmt and fmt not in {"png", "webp"}:
+            hint += " Transparent backgrounds also require png or webp output format."
+        raise ValueError(f"{canonical} does not support transparent background. {hint}")
+    max_refs = caps.get("max_refs")
+    if max_refs is not None and refs_count > int(max_refs):
+        raise ValueError(f"{canonical} supports at most {max_refs} reference images; got {refs_count}.")
+
+
+def _route_metadata(
+    *,
+    requested_model: str,
+    resolved_model: str,
+    api_mode: str,
+    endpoint: str,
+    fallback_attempted: bool = False,
+    fallback_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "requested_model": requested_model,
+        "resolved_model": resolved_model,
+        "api_mode": api_mode,
+        "endpoint": endpoint,
+        "fallback_attempted": fallback_attempted,
+        "fallback_reason": fallback_reason,
+    }
+
+
+def _attach_route_metadata(images: List["GeneratedImage"], metadata: Dict[str, Any]) -> None:
+    for img in images:
+        setattr(img, "provider_mode", metadata.get("api_mode"))
+        setattr(img, "route_metadata", dict(metadata))
+
+
 def _validate_image_options(
     *,
     model: str,
@@ -299,6 +379,8 @@ def _validate_image_options(
         raise ValueError(f"background 必须是 {sorted(VALID_BACKGROUNDS)} 之一")
     if fmt and fmt not in VALID_FORMATS:
         raise ValueError(f"format 必须是 {sorted(VALID_FORMATS)} 之一")
+
+    _validate_model_capability_options(model=model, background=background, fmt=fmt)
 
     if output_compression is not None:
         if not 0 <= output_compression <= 100:
@@ -887,8 +969,11 @@ def generate(
         print(f"[生成] {prompt[:50]}...")
         print(f"    模式: {api_mode} 参数: size={config.size or 'default'} quality={config.quality or 'default'} n={config.n}")
 
+    requested_model = config.model
+    resolved_model = config.model
     requested_auto = (config.api_mode or DEFAULT_API_MODE or "auto").lower() == "auto"
     fallback_tried = api_mode == "responses"
+    fallback_reason: Optional[str] = None
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -913,6 +998,7 @@ def generate(
                     last_error = err
                     raise RuntimeError(f"生成失败: {err}")
                 fallback_tried = True
+                fallback_reason = "images_endpoint_missing"
                 last_error = err
                 continue
             last_error = err
@@ -928,13 +1014,21 @@ def generate(
                 pass
             else:
                 fallback_tried = True
+                fallback_reason = "images_empty_image_payload"
                 last_error = "Images API 响应中没有图片数据"
                 continue
 
         # 成功
         images = saver(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
-        for img in images:
-            setattr(img, "provider_mode", api_mode)
+        route = _route_metadata(
+            requested_model=requested_model,
+            resolved_model=resolved_model,
+            api_mode=api_mode,
+            endpoint=endpoint,
+            fallback_attempted=bool(fallback_reason),
+            fallback_reason=fallback_reason,
+        )
+        _attach_route_metadata(images, route)
         if not images:
             raise RuntimeError("响应中没有图片数据")
 
@@ -973,6 +1067,12 @@ def edit(
         output_compression=config.output_compression,
         background=config.background,
     )
+    _validate_model_capability_options(
+        model=config.model,
+        background=config.background,
+        fmt=config.format,
+        refs_count=len(config.refs or []),
+    )
 
     if not silent:
         print(f"[编辑] {prompt[:50]}...")
@@ -993,8 +1093,11 @@ def edit(
         endpoint = "/images/edits"
         saver = _save_images
 
+    requested_model = config.model
+    resolved_model = config.model
     requested_auto = (config.api_mode or DEFAULT_API_MODE or "auto").lower() == "auto"
     fallback_tried = api_mode == "responses"
+    fallback_reason: Optional[str] = None
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -1038,6 +1141,7 @@ def edit(
                     last_error = err
                     raise RuntimeError(f"编辑失败: {err}")
                 fallback_tried = True
+                fallback_reason = "images_endpoint_missing"
                 last_error = err
                 continue
             last_error = err
@@ -1053,13 +1157,21 @@ def edit(
                 pass
             else:
                 fallback_tried = True
+                fallback_reason = "images_empty_image_payload"
                 last_error = "Images API 响应中没有图片数据"
                 continue
 
         # 成功
         images = saver(resp, prompt, config.outdir, config.filename_prefix, expected_n=config.n)
-        for img in images:
-            setattr(img, "provider_mode", api_mode)
+        route = _route_metadata(
+            requested_model=requested_model,
+            resolved_model=resolved_model,
+            api_mode=api_mode,
+            endpoint=endpoint,
+            fallback_attempted=bool(fallback_reason),
+            fallback_reason=fallback_reason,
+        )
+        _attach_route_metadata(images, route)
         if not images:
             raise RuntimeError("响应中没有图片数据")
 
@@ -1230,6 +1342,7 @@ def main():
             images = generate(args.prompt, config, silent=args.json)
 
         if args.json:
+            route = getattr(images[0], "route_metadata", None) if images else None
             result = {
                 "ok": True,
                 "paths": [img.saved_path for img in images if img.saved_path],
@@ -1240,8 +1353,9 @@ def main():
                     "output_format": args.fmt or "png",
                     "n": args.n,
                     "moderation": args.moderation or "low",
-                    "api_mode": ("responses" if getattr(images[0], "provider_mode", None) == "responses" else resolve_api_mode(args.api_mode)),
+                    "api_mode": (route or {}).get("api_mode") or ("responses" if getattr(images[0], "provider_mode", None) == "responses" else resolve_api_mode(args.api_mode)),
                 },
+                "route": route or {},
             }
             print(json.dumps(result, ensure_ascii=False))
         else:
